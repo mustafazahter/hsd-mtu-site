@@ -2,14 +2,15 @@ import { NextResponse } from 'next/server';
 import nodemailer from 'nodemailer';
 import { createClient } from '@supabase/supabase-js';
 
-// Server-side admin client for DB operations (Bypasses RLS if needed, but here we just need to read)
-const supabaseAdmin = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY! // API Route'da her zaman service_role kullanılmalı
-);
+function getSupabaseAdmin() {
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://placeholder.supabase.co';
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'placeholder-key';
+    return createClient(url, key);
+}
 
 export async function POST(req: Request) {
     try {
+        const supabaseAdmin = getSupabaseAdmin();
         const { name, email, subject, message } = await req.json();
 
         // Basit Doğrulama

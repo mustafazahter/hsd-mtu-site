@@ -1,6 +1,14 @@
 import { createBrowserClient } from '@supabase/ssr'
 import { createServerClient as createSSRServerClient, type CookieOptions } from '@supabase/ssr'
 
+export const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://placeholder.supabase.co';
+export const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'placeholder-key';
+
+export const isSupabaseConfigured = Boolean(
+    process.env.NEXT_PUBLIC_SUPABASE_URL && 
+    process.env.NEXT_PUBLIC_SUPABASE_URL !== 'https://placeholder.supabase.co'
+);
+
 // ============================================
 // Browser Client (Client Components)
 // ============================================
@@ -10,8 +18,8 @@ export function createClient() {
     if (typeof window !== 'undefined') {
         if (!supabaseBrowserClient) {
             supabaseBrowserClient = createBrowserClient(
-                process.env.NEXT_PUBLIC_SUPABASE_URL!,
-                process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+                SUPABASE_URL,
+                SUPABASE_ANON_KEY
             );
         }
         return supabaseBrowserClient;
@@ -19,8 +27,8 @@ export function createClient() {
     
     // Server-side fallback (hızlı oluşturulabilir çünkü stateless)
     return createBrowserClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+        SUPABASE_URL,
+        SUPABASE_ANON_KEY
     );
 }
 
@@ -32,8 +40,8 @@ export async function createServerClient(cookieStore: {
     set: (name: string, value: string, options: CookieOptions) => void | Promise<void>
 }) {
     return createSSRServerClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+        SUPABASE_URL,
+        SUPABASE_ANON_KEY,
         {
             cookies: {
                 getAll: async () => {
