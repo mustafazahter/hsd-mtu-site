@@ -1,0 +1,4660 @@
+'use client';
+
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import {
+    WorkspaceEvent,
+    WorkspaceCalendar,
+    WorkspaceGroup,
+    WorkspaceMember,
+    WorkspaceSubtask,
+    WorkspaceComment,
+    WorkspaceAttachment,
+    WorkspaceRole,
+    EventVisibility,
+    WorkspaceReminder,
+    EventAttendee,
+    RolePermissions,
+    MemberAttendance
+} from '@/shared/api/workspaceTypes';
+import { formatLocalDate } from './NotionCalendar';
+import EventReadOnlyView from './EventReadOnlyView';
+import UploadProgressRing from '@/shared/ui/UploadProgressRing';
+
+interface EventDrawerProps {
+    isOpen: boolean;
+    onClose: () => void;
+    event: WorkspaceEvent | null;
+    initialDate?: Date | null;
+    calendars: WorkspaceCalendar[];
+    groups: WorkspaceGroup[];
+    members: WorkspaceMember[];
+    currentMember: WorkspaceMember | null;
+    userPermissions?: RolePermissions | null;
+    theme?: 'light' | 'dark';
+    onEventSaved: (event: WorkspaceEvent) => void;
+    onEventDeleted: (eventId: string) => void;
+}
+
+const PRESET_COLORS = [
+    { name: 'Kırmızı (Etkinlik)', value: '#dc2626' },
+    { name: 'Mor (Proje)', value: '#8b5cf6' },
+    { name: 'Pembe (Sosyal/Tasarım)', value: '#ec4899' },
+    { name: 'Kehribar (Medium)', value: '#f59e0b' },
+    { name: 'Mavi (Koordinasyon)', value: '#3b82f6' },
+    { name: 'Zümrüt (Resmi)', value: '#10b981' },
+    { name: 'Cyan (Atölye)', value: '#06b6d4' },
+    { name: 'Nötr (Genel)', value: '#71717a' },
+];
+
+export const COMMITTEE_COLORS: Record<string, string> = {
+    cal_core: '#ef4444',    // Genel Topluluk Takvimi (Kırmızı)
+    cal_proj: '#3b82f6',    // Proje Komitesi Takvimi (Mavi)
+    cal_event: '#f97316',   // Etkinlik & Sponsorluk Komitesi (Turuncu)
+    cal_social: '#ec4899',  // Sosyal Medya & Tasarım Komitesi (Pembe)
+    cal_medium: '#eab308',  // Medium Komitesi Takvimi (Sarı)
+    cal_mgmt: '#8b5cf6',    // Yönetim & Koordinasyon Takvimi (Mor)
+};
+
+export const DEFAULT_WORKSPACE_CALENDARS: WorkspaceCalendar[] = [
+    { id: 'cal_core', title: 'Genel Topluluk Takvimi', color: '#ef4444', is_private: false },
+    { id: 'cal_proj', title: 'Proje Komitesi Takvimi', color: '#3b82f6', is_private: false },
+    { id: 'cal_event', title: 'Etkinlik & Sponsorluk Komitesi', color: '#f97316', is_private: false },
+    { id: 'cal_social', title: 'Sosyal Medya & Tasarım Komitesi', color: '#ec4899', is_private: false },
+    { id: 'cal_medium', title: 'Medium Komitesi Takvimi', color: '#eab308', is_private: false },
+    { id: 'cal_mgmt', title: 'Yönetim & Koordinasyon Takvimi', color: '#8b5cf6', is_private: true },
+    { id: 'cal_ai', title: 'Ar-Ge & Yapay Zeka Komitesi', color: '#10b981', is_private: false },
+];
+
+// ⚡ 4 Çekirdek Komiteye Özel Gelişmiş Etkinlik Şablonları (Templates)
+interface CommitteeTemplate {
+    id: string;
+    label: string;
+    committeeKey: 'proj' | 'event' | 'social' | 'medium';
+    committeeName: string;
+    committeeBadge: string;
+    committeeColor: string;
+    calendarId: string;
+    category: string;
+    title: string;
+    location: string;
+    meetingLink?: string;
+    durationMinutes: number;
+    description: string;
+    subtasks: string[];
+}
+
+const COMMITTEE_TEMPLATES: CommitteeTemplate[] = [
+    // 🟣 1. PROJE KOMİTESİ (5 Şablon)
+    {
+        id: 'tmpl_proj_sprint',
+        label: 'Sprint Planlama & Backlog',
+        committeeKey: 'proj',
+        committeeName: 'Proje Komitesi',
+        committeeBadge: '🟣 Proje',
+        committeeColor: '#8b5cf6',
+        calendarId: 'cal_dev',
+        category: 'Geliştirme',
+        title: 'HSD Haftalık Sprint & Backlog Planlaması',
+        location: 'Discord Ses Kanalı',
+        meetingLink: 'https://discord.gg/hsdmtu',
+        durationMinutes: 60,
+        description: `### 🎯 Sprint Hedefleri & Çıktılar
+- Geçen sprintin tamamlanan ve devreden işlerinin analizi
+- GitHub Issues & PR önceliklendirmesi (High / Medium / Low)
+- Bu haftaki milestone teslimatları ve test kapsamı
+- Pair-programming eşleşmeleri ve kod mimarisi kararları`,
+        subtasks: [
+            'Geçmiş sprint retrospective notları incelendi',
+            'GitHub Issue backlog temizlendi ve etiketlendi',
+            'Geliştiricilere modül görevleri dağıtıldı',
+            'Sprint bitiş tarihi ve demo günü teyit edildi',
+            'Discord proje kanalına özet aktarıldı'
+        ]
+    },
+    {
+        id: 'tmpl_proj_review',
+        label: 'Code Review & Refactor',
+        committeeKey: 'proj',
+        committeeName: 'Proje Komitesi',
+        committeeBadge: '🟣 Proje',
+        committeeColor: '#8b5cf6',
+        calendarId: 'cal_dev',
+        category: 'Geliştirme',
+        title: 'Topluluk Projesi Kod İnceleme & Pair Programming',
+        location: 'Google Meet',
+        meetingLink: 'https://meet.google.com/hsd-mtu-code',
+        durationMinutes: 90,
+        description: `### 🔍 Kod İnceleme & Güvenlik Kapsamı
+- Pull Request mimari ve TypeScript tip kontrolleri
+- Supabase RLS politikaları ve veri güvenliği doğrulaması
+- useFrozen() ve performans bütçesi kontrolü
+- Production öncesi staging ortamı testi`,
+        subtasks: [
+            'Açık PR\'lar lokal ortama çekilip derlendi',
+            'Linter, Prettier ve tip hataları giderildi',
+            'Performans kriterleri (LCP, CLS) doğrulandı',
+            'Kod sahibiyle geri bildirimler paylaşıldı ve merge edildi'
+        ]
+    },
+    {
+        id: 'tmpl_proj_hackathon',
+        label: 'Hackathon & Maraton Kampı',
+        committeeKey: 'proj',
+        committeeName: 'Proje Komitesi',
+        committeeBadge: '🟣 Proje',
+        committeeColor: '#8b5cf6',
+        calendarId: 'cal_dev',
+        category: 'Hackathon',
+        title: 'Teknik Hackathon & Proje Geliştirme Kampı',
+        location: 'MTÜ Mühendislik Fakültesi D-102 Lab',
+        durationMinutes: 180,
+        description: `### 🚀 Hackathon Yol Haritası
+- Problem tanımı ve Huawei Cloud / HarmonyOS / AI API seçimi
+- MVP (Minimum Viable Product) kullanıcı akış şeması
+- 24 saatlik geliştirme maratonu ve sunum demosu`,
+        subtasks: [
+            'Hackathon kuralları ve değerlendirme jürisi belirlendi',
+            'Takım rolleri (Frontend, Backend, AI, Tasarım) dağıtıldı',
+            'Boilerplate proje deposu (Next.js + Tailwind) klonlandı',
+            'Jüri için 3 dakikalık sunum slaytı hazırlandı'
+        ]
+    },
+    {
+        id: 'tmpl_proj_workshop',
+        label: 'Hands-on Teknik Atölye',
+        committeeKey: 'proj',
+        committeeName: 'Proje Komitesi',
+        committeeBadge: '🟣 Proje',
+        committeeColor: '#8b5cf6',
+        calendarId: 'cal_dev',
+        category: 'Workshop',
+        title: 'Hands-on Teknik Atölye: Modern Web & Cloud Mimarisi',
+        location: 'MTÜ Battalgazi D-105 Bilgisayar Lab',
+        durationMinutes: 120,
+        description: `### 💻 Atölye Kazanımları
+- Next.js 16 App Router ve SSR mantığı
+- Supabase gerçek zamanlı veri tabanı yönetimi
+- Katılımcıların canlıda çalışan bir web uygulaması yayınlaması`,
+        subtasks: [
+            'Lab bilgisayarlarında Node.js ve VS Code kurulumu teyit edildi',
+            'Örnek başlangıç reposu (Starter repo) hazırlandı',
+            'Katılımcı kılavuzu (PDF) paylaşıldı',
+            'Atölye sonu soru-cevap ve sertifika kaydı yapıldı'
+        ]
+    },
+    {
+        id: 'tmpl_proj_rfc',
+        label: 'Mimari Tasarım (RFC)',
+        committeeKey: 'proj',
+        committeeName: 'Proje Komitesi',
+        committeeBadge: '🟣 Proje',
+        committeeColor: '#8b5cf6',
+        calendarId: 'cal_dev',
+        category: 'Toplantı',
+        title: 'Sistem Mimarisi & RFC (Request for Comments) Toplantısı',
+        location: 'Google Meet',
+        meetingLink: 'https://meet.google.com/hsd-mtu-rfc',
+        durationMinutes: 60,
+        description: `### 📐 Mimari Tasarım Gündemi
+- Yeni servis mimarisi ve mikro-servis geçiş fizibilitesi
+- API şeması ve veri tabanı ilişkisel modeli (ER Diagram)
+- Ölçeklenebilirlik ve sunucu kaynak analizi`,
+        subtasks: [
+            'RFC teknik dokümanı yazılıp ekibe iletildi',
+            'Veritabanı ilişkileri ve indeks yapıları tartışıldı',
+            'Teknik borç (tech debt) maddeleri listelendi',
+            'Nihai mimari kararlar dokümante edildi'
+        ]
+    },
+
+    // 🔴 2. ETKİNLİK & SPONSORLUK KOMİTESİ (5 Şablon)
+    {
+        id: 'tmpl_evt_summit',
+        label: 'Teknoloji Zirvesi (Büyük)',
+        committeeKey: 'event',
+        committeeName: 'Etkinlik & Sponsorluk',
+        committeeBadge: '🔴 Etkinlik',
+        committeeColor: '#dc2626',
+        calendarId: 'cal_core',
+        category: 'Toplantı',
+        title: 'HSD Malatya Teknoloji Zirvesi & Büyük Konferans',
+        location: 'MTÜ Battalgazi Konferans Salonu',
+        durationMinutes: 240,
+        description: `### 🏛️ Zirve Detayları
+- 200+ Üniversite öğrencisi ve yazılım sektörü profesyonelleri
+- 4 Ana Oturum: Yapay Zeka, Bulut Bilişim, Mobil Ekosistem, Girişimcilik
+- Networking alanı, çekilişler ve ikramlar`,
+        subtasks: [
+            'Konferans salonu rektörlük tahsis onayı alındı',
+            '4 ana konuşmacının ulaşım ve konaklama planı netleşti',
+            'Ses sistemi, LED ekran, mikrofon ve canlı yayın altyapısı kuruldu',
+            'Etkinlik giriş QR barkod okuma ekibi görevlendirildi',
+            'Etkinlik sonu katılımcı memnuniyet anketi iletildi'
+        ]
+    },
+    {
+        id: 'tmpl_evt_webinar',
+        label: 'Webinar & Tech Talk',
+        committeeKey: 'event',
+        committeeName: 'Etkinlik & Sponsorluk',
+        committeeBadge: '🔴 Etkinlik',
+        committeeColor: '#dc2626',
+        calendarId: 'cal_core',
+        category: 'Toplantı',
+        title: 'Konuk Konuşmacı ile Canlı Tech Talk & Webinar',
+        location: 'Google Meet & YouTube Canlı Yayın',
+        meetingLink: 'https://meet.google.com/hsd-techtalk',
+        durationMinutes: 60,
+        description: `### 🎙️ Webinar Akışı
+- Konuk: Kıdemli Yazılım Mühendisi / Huawei Developer Expert
+- 45 dk Teknik Sunum + 20 dk İnteraktif Soru-Cevap
+- Canlı yayında katılımcılara hediye Huawei kuponları`,
+        subtasks: [
+            'Konuk ile prova yayını ve ses/ekran testi yapıldı',
+            'YouTube Canlı Yayın linki oluşturulup topluluğa duyuruldu',
+            'Moderatör soru listesi hazırlandı',
+            'Canlı yayın chat moderatörleri atandı'
+        ]
+    },
+    {
+        id: 'tmpl_evt_sponsor',
+        label: 'Sponsorluk Görüşmesi',
+        committeeKey: 'event',
+        committeeName: 'Etkinlik & Sponsorluk',
+        committeeBadge: '🔴 Etkinlik',
+        committeeColor: '#dc2626',
+        calendarId: 'cal_core',
+        category: 'Sponsorluk',
+        title: 'Kurumsal Sponsorluk & Üniversite İş Birliği Görüşmesi',
+        location: 'Google Meet',
+        meetingLink: 'https://meet.google.com/hsd-sponsor-meet',
+        durationMinutes: 45,
+        description: `### 💼 Sponsorluk Toplantı Gündemi
+- HSD MTÜ 2026 etkinlik takvimi ve erişim istatistikleri
+- Platin, Altın ve Gümüş sponsorluk paketlerinin sunumu
+- Staj, mentorluk ve teknik destek iş birlikleri`,
+        subtasks: [
+            'Güncel sponsorluk dosyası (Pitch Deck PDF) gönderildi',
+            'Firma yetkilisinin bütçe talebi ve istekleri not alındı',
+            'Resmi protokol taslağı hazırlandı',
+            'Teşekkür e-postası ve sözleşme süreci takip edildi'
+        ]
+    },
+    {
+        id: 'tmpl_evt_stand',
+        label: 'Kampüs Tanıtım Standı',
+        committeeKey: 'event',
+        committeeName: 'Etkinlik & Sponsorluk',
+        committeeBadge: '🔴 Etkinlik',
+        committeeColor: '#dc2626',
+        calendarId: 'cal_core',
+        category: 'Genel',
+        title: 'Kampüs Tanıtım Standı & Yeni Üye Kabulü',
+        location: 'MTÜ Battalgazi Merkez Fuaye Alanı',
+        durationMinutes: 240,
+        description: `### 🎪 Stant Organizasyonu
+- Üniversite öğrencilerine HSD MTÜ faaliyetlerinin anlatılması
+- Yeni dönem çalışma grupları için üye kaydı alınması
+- Huawei sticker, defter ve hediye ürün dağıtımı`,
+        subtasks: [
+            'SKS Daire Başkanlığı stant izin dilekçesi onaylatıldı',
+            'Roll-up bannerlar ve masa örtüsü stant alanına kuruldu',
+            'Ekip üyeleri 2 saatlik nöbet çizelgesine yerleştirildi',
+            'Karekodlu üye kayıt formu tablet üzerinde hazırlandı'
+        ]
+    },
+    {
+        id: 'tmpl_evt_official',
+        label: 'Resmi İzin & Lojistik',
+        committeeKey: 'event',
+        committeeName: 'Etkinlik & Sponsorluk',
+        committeeBadge: '🔴 Etkinlik',
+        committeeColor: '#dc2626',
+        calendarId: 'cal_core',
+        category: 'Toplantı',
+        title: 'Rektörlük / SKS Resmi İzin & Lojistik Toplantısı',
+        location: 'MTÜ Rektörlük Binası Toplantı Salonu',
+        durationMinutes: 45,
+        description: `### 📜 Resmi Prosedürler
+- Dönemlik etkinlik takviminin danışman hocaya sunulması
+- Salon tahsis, güvenlik ve temizlik koordinasyonu
+- Resmi onay yazılarının teslimi`,
+        subtasks: [
+            'Etkinlik talep dilekçesi danışman hocaya imzalatıldı',
+            'Sağlık Kültür ve Spor (SKS) birimine teslim edildi',
+            'Güvenlik amirliği etkinlik saatleri konusunda bilgilendirildi'
+        ]
+    },
+
+    // 🌸 3. SOSYAL MEDYA & TASARIM KOMİTESİ (4 Şablon)
+    {
+        id: 'tmpl_soc_reels',
+        label: 'Reels & Kısa Video',
+        committeeKey: 'social',
+        committeeName: 'Sosyal Medya & Tasarım',
+        committeeBadge: '🌸 Sosyal',
+        committeeColor: '#ec4899',
+        calendarId: 'cal_social',
+        category: 'Sosyal Medya',
+        title: 'Instagram Reels & TikTok Dinamik Video Yayını',
+        location: 'Instagram (@hsdmtu) & CapCut',
+        durationMinutes: 60,
+        description: `### 🎬 Video Konsepti
+- 30-45 saniyelik dinamik etkinlik duyurusu / yazılım ipucu
+- Kanca (Hook), değer önerisi ve harekete geçirici mesaj (CTA)
+- Trend ses ve Huawei marka renklerine uygun tipografi`,
+        subtasks: [
+            'Ham video çekimleri tamamlandı',
+            'CapCut / Premiere üzerinde dinamik altyazı ve efektler eklendi',
+            'Açıklama metni, hashtagler ve etiketler hazırlandı',
+            'Komite başkanı onayı sonrası en etkileşimli saatte yayınlandı'
+        ]
+    },
+    {
+        id: 'tmpl_soc_poster',
+        label: 'Afiş & Baskı Tasarımı',
+        committeeKey: 'social',
+        committeeName: 'Sosyal Medya & Tasarım',
+        committeeBadge: '🌸 Sosyal',
+        committeeColor: '#ec4899',
+        calendarId: 'cal_social',
+        category: 'Sosyal Medya',
+        title: 'Etkinlik Afişi, Banner ve Yaka Kartı Baskı Tasarımı',
+        location: 'Figma Çalışma Alanı',
+        durationMinutes: 90,
+        description: `### 🎨 Baskı & Dijital Varlıklar
+- 50x70cm Dikey Salon Afişi (CMYK 300 DPI)
+- 1920x1080 LED Sahne Ekranı Görseli (RGB)
+- Katılımcı ve Görevli Yaka Kartı Şablonu`,
+        subtasks: [
+            'Figma üzerinde 3 farklı konsept varyasyonu hazırlandı',
+            'Tüm konuşmacı fotoğrafları ve unvanları teyit edildi',
+            'Matbaa için kesim payı (bleed) ve renk profili kontrol edildi',
+            'Baskı merkezine PDF çıktı teslim edildi'
+        ]
+    },
+    {
+        id: 'tmpl_soc_critique',
+        label: 'Tasarım İncelemesi (Critique)',
+        committeeKey: 'social',
+        committeeName: 'Sosyal Medya & Tasarım',
+        committeeBadge: '🌸 Sosyal',
+        committeeColor: '#ec4899',
+        calendarId: 'cal_social',
+        category: 'Sosyal Medya',
+        title: 'Haftalık Tasarım İnceleme & Brand Guidelines Kontrolü',
+        location: 'Google Meet & Figma Live',
+        meetingLink: 'https://meet.google.com/hsd-design-critique',
+        durationMinutes: 60,
+        description: `### 🖌️ İnceleme Kriterleri
+- Huawei marka rehberi (renk kodları, logo güvenli alanları)
+- Tipografi hiyerarşisi ve mobil ekran okunabilirliği
+- Önümüzdeki haftanın içerik takviminin netleştirilmesi`,
+        subtasks: [
+            'Haftalık görsel taslakları Figma tahtasında toplandı',
+            'Renk kontrastları ve font boyutları incelendi',
+            'Revize istekleri tasarımcılara iletildi'
+        ]
+    },
+    {
+        id: 'tmpl_soc_story',
+        label: 'Story & Anket Serisi',
+        committeeKey: 'social',
+        committeeName: 'Sosyal Medya & Tasarım',
+        committeeBadge: '🌸 Sosyal',
+        committeeColor: '#ec4899',
+        calendarId: 'cal_social',
+        category: 'Sosyal Medya',
+        title: 'Instagram Hikaye (Story) Serisi & Etkileşim Anketi',
+        location: 'Instagram (@hsdmtu)',
+        durationMinutes: 45,
+        description: `### 📱 Hikaye Dizisi
+- 5 adımlı etkileşim akışı: Merak uyandırma -> Bilgi -> Anket -> Link
+- Geri sayım sayacı ve soru-cevap kutusu`,
+        subtasks: [
+            '1080x1920 hikaye görselleri hazırlandı',
+            'Bio linkine doğrudan etkinlik başvuru URL\'i eklendi',
+            'Gelen anket yanıtları ve DM\'ler kaydedildi'
+        ]
+    },
+
+    // 🟠 4. MEDIUM KOMİTESİ (4 Şablon)
+    {
+        id: 'tmpl_med_article',
+        label: 'Haftalık Teknik Makale',
+        committeeKey: 'medium',
+        committeeName: 'Medium Komitesi',
+        committeeBadge: '🟠 Medium',
+        committeeColor: '#f59e0b',
+        calendarId: 'cal_social',
+        category: 'Yayın',
+        title: 'HSD Medium Teknik Blog: Haftalık Yazılım Makalesi',
+        location: 'medium.com/@hsdmtu',
+        durationMinutes: 90,
+        description: `### ✍️ Makale Detayları
+- Başlık: Modern Web & Mobil Geliştirme Teknolojileri
+- Yazar: Topluluk Teknik Ekibi Üyesi
+- Hedef: 1000+ kelime, çalışan kod blokları ve mimari şemalar`,
+        subtasks: [
+            'Makale taslağı Markdown olarak kaleme alındı',
+            'Kod blokları ve syntax vurguları test edildi',
+            '1200x630 piksel özel kapak görseli hazırlandı',
+            'Teknik editörden imla ve özgünlük onayı alındı',
+            'Medium yayınında yayına alındı ve sosyal medyada paylaşıldı'
+        ]
+    },
+    {
+        id: 'tmpl_med_writers',
+        label: 'Yazar Koordinasyonu',
+        committeeKey: 'medium',
+        committeeName: 'Medium Komitesi',
+        committeeBadge: '🟠 Medium',
+        committeeColor: '#f59e0b',
+        calendarId: 'cal_social',
+        category: 'Yayın',
+        title: 'Medium Yazarları Aylık İçerik & Fikir Dağıtım Toplantısı',
+        location: 'Google Meet',
+        meetingLink: 'https://meet.google.com/hsd-medium-writers',
+        durationMinutes: 60,
+        description: `### 📝 Toplantı Gündemi
+- Önümüzdeki 4 haftanın teknoloji konu başlıkları (AI, Cloud, Frontend, DevOps)
+- Yeni katılan yazar adayları için yayınlama kılavuzu
+- Teslim tarihleri ve editör eşleşmeleri`,
+        subtasks: [
+            'Konu havuzu oylamaya sunuldu',
+            'Her yazara 1 makale konusu ve teslim tarihi atandı',
+            'SEO anahtar kelime listesi yazarlara iletildi'
+        ]
+    },
+    {
+        id: 'tmpl_med_peer',
+        label: 'Editörlük (Peer-Review)',
+        committeeKey: 'medium',
+        committeeName: 'Medium Komitesi',
+        committeeBadge: '🟠 Medium',
+        committeeColor: '#f59e0b',
+        calendarId: 'cal_social',
+        category: 'Yayın',
+        title: 'Makale Editörlük & Peer-Review İnceleme Oturumu',
+        location: 'Google Docs & Medium Taslak',
+        durationMinutes: 45,
+        description: `### 🔍 Editör İncelemesi
+- Teknik doğruluk ve kod örneği çalıştırma testi
+- Anlatım akıcılığı, Türkçe imla kuralları ve SEO optimizasyonu
+- Kaynakça ve referans kontrolleri`,
+        subtasks: [
+            'Yazının intihal (plagiarism) kontrolü yapıldı',
+            'Görsellerin telif hakları ve alt-text etiketleri doğrulandı',
+            'Yazara geri bildirim notları iletildi'
+        ]
+    },
+    {
+        id: 'tmpl_med_newsletter',
+        label: 'Aylık Bülten (Newsletter)',
+        committeeKey: 'medium',
+        committeeName: 'Medium Komitesi',
+        committeeBadge: '🟠 Medium',
+        committeeColor: '#f59e0b',
+        calendarId: 'cal_social',
+        category: 'Yayın',
+        title: 'Aylık Topluluk Bülteni: "Bu Ay HSD MTÜ\'de Neler Oldu?"',
+        location: 'Medium & E-Posta Bülteni',
+        durationMinutes: 60,
+        description: `### 📰 Bülten Kapsamı
+- Ay boyunca gerçekleştirilen etkinlik ve atölye özetleri
+- Ayın en çok okunan Medium makaleleri
+- Gelecek ayın heyecan verici projeleri ve duyuruları`,
+        subtasks: [
+            'Etkinlik fotoğrafları ve istatistikleri toplandı',
+            'Ayın en aktif topluluk üyeleri listelendi',
+            'Bülten kapağı ve e-posta şablonu hazırlandı',
+            'Tüm üyelere ve takipçilere iletildi'
+        ]
+    }
+];
+
+export default function EventDrawer({
+    isOpen,
+    onClose,
+    event,
+    initialDate,
+    calendars,
+    groups,
+    members,
+    currentMember,
+    userPermissions,
+    theme = 'dark',
+    onEventSaved,
+    onEventDeleted,
+}: EventDrawerProps) {
+    const isLight = theme === 'light';
+
+    // ── 🎯 SEKME (TAB) YÖNETİMİ (Düzenli & Karışıklıktan Arındırılmış Deneyim) ──
+    type DrawerTab = 'general' | 'datetime' | 'access' | 'rsvp' | 'tasks' | 'communication' | 'all';
+    const [activeDrawerTab, setActiveDrawerTab] = useState<DrawerTab>('general');
+    const [showTemplates, setShowTemplates] = useState<boolean>(false);
+
+    // Form State
+    const [title, setTitle] = useState('');
+    const [calendarId, setCalendarId] = useState('cal_core');
+    const [category, setCategory] = useState('Toplantı');
+    const [color, setColor] = useState('#dc2626');
+    const [startDate, setStartDate] = useState('');
+    const [startTime, setStartTime] = useState('10:00');
+    const [endDate, setEndDate] = useState('');
+    const [endTime, setEndTime] = useState('11:00');
+    const [isAllDay, setIsAllDay] = useState(false);
+    const [location, setLocation] = useState('');
+    const [meetingLink, setMeetingLink] = useState('');
+    const [description, setDescription] = useState('');
+    const [status, setStatus] = useState<'scheduled' | 'in_progress' | 'completed' | 'cancelled'>('scheduled');
+    const [visibility, setVisibility] = useState<EventVisibility>('public');
+    const [customVisibleMembers, setCustomVisibleMembers] = useState<string[]>([]);
+    const [customVisibleCommittees, setCustomVisibleCommittees] = useState<string[]>([]);
+    const [memberSearchQuery, setMemberSearchQuery] = useState('');
+    const availableCommittees = calendars && calendars.length > 0 ? calendars : DEFAULT_WORKSPACE_CALENDARS;
+    const [reminders, setReminders] = useState<WorkspaceReminder[]>([]);
+    const [customReminderVal, setCustomReminderVal] = useState<number>(30);
+    const [customReminderUnit, setCustomReminderUnit] = useState<'minutes' | 'hours' | 'days'>('minutes');
+    const [customReminderTarget, setCustomReminderTarget] = useState<'all' | 'admins' | 'assignees'>('all');
+    const [assignees, setAssignees] = useState<string[]>([]);
+    const [subtasks, setSubtasks] = useState<WorkspaceSubtask[]>([]);
+    const [comments, setComments] = useState<WorkspaceComment[]>([]);
+    const [attachments, setAttachments] = useState<WorkspaceAttachment[]>([]);
+    const [version, setVersion] = useState<number>(1);
+
+    // 🚀 Vitrin & RSVP & Webhook State
+    const [isShowcase, setIsShowcase] = useState(false);
+    const [rsvpEnabled, setRsvpEnabled] = useState(false);
+    const [rsvpQrEnabled, setRsvpQrEnabled] = useState(false);
+    const [rsvpCapacity, setRsvpCapacity] = useState<number | ''>('');
+    const [attendees, setAttendees] = useState<EventAttendee[]>([]);
+    const [isLoadingAttendees, setIsLoadingAttendees] = useState(false);
+    const [webhookFeedback, setWebhookFeedback] = useState<string | null>(null);
+    const [isSendingWebhook, setIsSendingWebhook] = useState(false);
+
+    // 👥 Dahili Ekip Katılım Durumları (Katılacaklar, Katılmayacaklar & Gerekçeleri)
+    const [memberAttendanceList, setMemberAttendanceList] = useState<MemberAttendance[]>([]);
+    const [attendanceFilter, setAttendanceFilter] = useState<'all' | 'attending' | 'declined' | 'maybe' | 'pending'>('all');
+
+    // 💬 Contributor+ Seviyesi Yorum Yetki Kontrolü
+    const canComment = userPermissions?.can_comment ?? (
+        currentMember?.role === 'super_admin' ||
+        currentMember?.role === 'workspace_admin' ||
+        currentMember?.role === 'editor' ||
+        currentMember?.role === 'contributor'
+    );
+
+    // 🛡️ Yetki Modeli: Düzenleme vs. Görüntüleme (Etkinliği Düzenle vs. Etkinliği Görüntüle)
+    const isCreator = Boolean(event && currentMember && event.created_by === currentMember.id);
+    const isAdmin = Boolean(
+        currentMember?.role === 'super_admin' ||
+        currentMember?.role === 'workspace_admin' ||
+        currentMember?.role?.toLowerCase().includes('admin') ||
+        currentMember?.role?.toLowerCase().includes('lead')
+    );
+    const hasEditPermission = Boolean(userPermissions?.can_edit);
+    const canEditEvent = !event 
+        ? (userPermissions?.can_create ?? true) 
+        : (isCreator || isAdmin || hasEditPermission);
+    const isReadOnly = Boolean(event && !canEditEvent);
+    const canDeleteEvent = Boolean(event && (isCreator || isAdmin || userPermissions?.can_delete));
+
+    // Bireysel Katılım Durumu (Görüntüleme Modunda Anında Yanıt)
+    const [myAttendanceStatus, setMyAttendanceStatus] = useState<'attending' | 'declined' | 'maybe' | null>(null);
+    const [myAttendanceReason, setMyAttendanceReason] = useState<string>('');
+    const [isSubmittingMyRsvp, setIsSubmittingMyRsvp] = useState<boolean>(false);
+    const [myRsvpFeedback, setMyRsvpFeedback] = useState<string | null>(null);
+
+    // Sekmeler Arası Hızlı İlerleme
+    const TABS_ORDER: DrawerTab[] = ['general', 'datetime', 'access', 'rsvp', 'tasks', 'communication'];
+    const goToNextTab = () => {
+        const curIdx = TABS_ORDER.indexOf(activeDrawerTab);
+        if (curIdx < TABS_ORDER.length - 1) {
+            setActiveDrawerTab(TABS_ORDER[curIdx + 1]);
+        }
+    };
+    const goToPrevTab = () => {
+        const curIdx = TABS_ORDER.indexOf(activeDrawerTab);
+        if (curIdx > 0) {
+            setActiveDrawerTab(TABS_ORDER[curIdx - 1]);
+        }
+    };
+
+    // Past Event Detection & Permissions
+    const isEventPast = useMemo(() => {
+        if (!event) return false;
+        try {
+            return new Date(event.end_time).getTime() < Date.now();
+        } catch {
+            return false;
+        }
+    }, [event]);
+
+    const canEditPast = useMemo(() => {
+        if (!isEventPast) return canEditEvent;
+        if (isAdmin) return true;
+        return false;
+    }, [isEventPast, canEditEvent, isAdmin]);
+
+    // Active Tab for Markdown
+    const [descTab, setDescTab] = useState<'write' | 'preview'>('write');
+
+    // Committee Quick Filter Tab
+    const [activeCommitteeTab, setActiveCommitteeTab] = useState<'all' | 'proj' | 'event' | 'social' | 'medium'>('all');
+
+    // Filter templates by active committee tab (Unconditional Hook)
+    const filteredTemplates = useMemo(() => {
+        if (activeCommitteeTab === 'all') return COMMITTEE_TEMPLATES;
+        return COMMITTEE_TEMPLATES.filter(t => t.committeeKey === activeCommitteeTab);
+    }, [activeCommitteeTab]);
+
+    // Flash Template Notification
+    const [appliedTemplateFeedback, setAppliedTemplateFeedback] = useState<string | null>(null);
+
+    // Subtask input
+    const [newSubtaskTitle, setNewSubtaskTitle] = useState('');
+
+    // Comment input & Tag
+    const [newCommentText, setNewCommentText] = useState('');
+    const [newCommentTag, setNewCommentTag] = useState<'general' | 'idea' | 'blocker' | 'decision' | 'info'>('general');
+
+    // Professional Reminders State
+    const [isTestingReminder, setIsTestingReminder] = useState(false);
+    const [reminderTestSuccess, setReminderTestSuccess] = useState(false);
+
+    // Instant Announcement State
+    const [announcementAudience, setAnnouncementAudience] = useState<'all' | 'group' | 'role'>('group');
+    const [selectedGroupId, setSelectedGroupId] = useState(groups[0]?.id || 'grp_project');
+    const [selectedRole, setSelectedRole] = useState<WorkspaceRole>('editor');
+    const [announcementMsg, setAnnouncementMsg] = useState('');
+    const [isSendingAnnouncement, setIsSendingAnnouncement] = useState(false);
+    const [announcementSuccess, setAnnouncementSuccess] = useState(false);
+
+    // UI Loading & Feedback
+    const [isSaving, setIsSaving] = useState(false);
+    const [isDeleting, setIsDeleting] = useState(false);
+    const [isUploading, setIsUploading] = useState(false);
+    const [uploadProgress, setUploadProgress] = useState(0);
+    const [uploadingFileName, setUploadingFileName] = useState('');
+    const [showAdvancedDatetime, setShowAdvancedDatetime] = useState(false);
+    const [showAdvancedAccess, setShowAdvancedAccess] = useState(false);
+    const [errorMsg, setErrorMsg] = useState<string | null>(null);
+    const [isAddingComment, setIsAddingComment] = useState(false);
+    const [commentError, setCommentError] = useState<string | null>(null);
+
+    // Track drawer open lifecycle to avoid re-initializing and resetting active tab during background syncs
+    const prevOpenRef = useRef(false);
+    const prevEventIdRef = useRef<string | null | undefined>(undefined);
+
+    // Populate when opening/editing
+    useEffect(() => {
+        if (!isOpen) {
+            prevOpenRef.current = false;
+            prevEventIdRef.current = undefined;
+            return;
+        }
+
+        const eventKey = event?.id || (initialDate ? `new_${initialDate}` : 'new_event');
+        const isFreshOpen = !prevOpenRef.current || prevEventIdRef.current !== eventKey;
+
+        if (isFreshOpen) {
+            prevOpenRef.current = true;
+            prevEventIdRef.current = eventKey;
+
+            setActiveDrawerTab('general');
+            setShowTemplates(!event);
+            setMemberAttendanceList(event?.member_attendance || []);
+
+            if (event) {
+                if (event.id) {
+                    fetch(`/api/workspace/events/${event.id}/attendance`)
+                        .then(res => res.json())
+                        .then(data => {
+                            if (data.attendees && Array.isArray(data.attendees)) {
+                                setMemberAttendanceList(data.attendees);
+                            }
+                        })
+                        .catch(() => {});
+                }
+
+                setTitle(event.title || '');
+                const targetCalId = event.calendar_id || calendars[0]?.id || 'cal_core';
+                setCalendarId(targetCalId);
+                setCategory(event.category || 'Toplantı');
+                setColor(COMMITTEE_COLORS[targetCalId] || event.color || '#ef4444');
+                setIsAllDay(Boolean(event.is_all_day));
+                setLocation(event.location || '');
+                setMeetingLink(event.meeting_link || '');
+                setDescription(event.description || '');
+                setStatus(event.status || 'scheduled');
+                setVisibility(event.visibility || 'public');
+                setCustomVisibleMembers((event as any).allowed_member_ids || event.assignees || []);
+                setCustomVisibleCommittees((event as any).allowed_committee_ids || []);
+                setMemberSearchQuery('');
+                setReminders(event.reminders || []);
+                setAssignees(event.assignees || []);
+                setSubtasks(event.subtasks || []);
+                setComments(event.comments || []);
+                setAttachments(event.attachments || []);
+                setVersion(event.version || 1);
+                setIsShowcase(Boolean(event.is_showcase));
+                setRsvpEnabled(Boolean(event.rsvp_enabled));
+                setRsvpQrEnabled(Boolean(event.rsvp_qr_enabled));
+                setRsvpCapacity(event.rsvp_capacity || '');
+
+                // Fetch latest comments directly from database
+                if (event.id) {
+                    fetch(`/api/workspace/events/${event.id}/comments`)
+                        .then(res => res.json())
+                        .then(data => {
+                            if (data.comments && Array.isArray(data.comments)) {
+                                setComments(data.comments);
+                            }
+                        })
+                        .catch(err => console.error('Yorum yükleme hatası:', err));
+
+                    // Fetch RSVP Attendees
+                    setIsLoadingAttendees(true);
+                    fetch(`/api/workspace/rsvp?event_id=${event.id}`)
+                        .then(res => res.json())
+                        .then(data => {
+                            if (data.attendees && Array.isArray(data.attendees)) {
+                                setAttendees(data.attendees);
+                            } else {
+                                setAttendees([]);
+                            }
+                        })
+                        .catch(err => console.error('RSVP yükleme hatası:', err))
+                        .finally(() => setIsLoadingAttendees(false));
+                } else {
+                    setAttendees([]);
+                }
+
+                // Parse Dates & Current Member's Attendance
+                try {
+                    const s = new Date(event.start_time);
+                    setStartDate(formatLocalDate(s));
+                    setStartTime(s.toTimeString().substring(0, 5));
+
+                    const e = new Date(event.end_time);
+                    setEndDate(formatLocalDate(e));
+                    setEndTime(e.toTimeString().substring(0, 5));
+                } catch {
+                    const today = formatLocalDate(new Date());
+                    setStartDate(today);
+                    setEndDate(today);
+                }
+
+                // Set my attendance
+                if (currentMember && event.member_attendance) {
+                    const myAtt = event.member_attendance.find(a => a.user_id === currentMember.id);
+                    setMyAttendanceStatus(myAtt?.status || null);
+                    setMyAttendanceReason(myAtt?.reason || '');
+                } else {
+                    setMyAttendanceStatus(null);
+                    setMyAttendanceReason('');
+                }
+                setMyRsvpFeedback(null);
+            } else {
+                // New Event Defaults: Use clicked date (initialDate) if available!
+                const baseDate = initialDate ? new Date(initialDate) : new Date();
+                const targetDateStr = formatLocalDate(baseDate);
+
+                setTitle('');
+                const defaultCalId = calendars[0]?.id || 'cal_core';
+                setCalendarId(defaultCalId);
+                setCategory('Toplantı');
+                setColor(COMMITTEE_COLORS[defaultCalId] || '#ef4444');
+                setStartDate(targetDateStr);
+                setStartTime('10:00');
+                setEndDate(targetDateStr);
+                setEndTime('11:00');
+                setIsAllDay(false);
+                setLocation('');
+                setMeetingLink('');
+                setDescription('');
+                setStatus('scheduled');
+                setVisibility('public');
+                setCustomVisibleMembers([]);
+                setCustomVisibleCommittees([]);
+                setMemberSearchQuery('');
+                setReminders([
+                    { id: `rem_default_1`, minutes_before: 60, target: 'all' }
+                ]);
+                setAssignees(currentMember ? [currentMember.id] : []);
+                setSubtasks([]);
+                setComments([]);
+                setAttachments([]);
+                setVersion(1);
+                setIsShowcase(false);
+                setRsvpEnabled(false);
+                setRsvpQrEnabled(false);
+                setRsvpCapacity('');
+                setAttendees([]);
+            }
+
+            setErrorMsg(null);
+            setCommentError(null);
+            setAppliedTemplateFeedback(null);
+            setAnnouncementSuccess(false);
+            setAnnouncementMsg('');
+            setReminderTestSuccess(false);
+        }
+    }, [isOpen, event, initialDate, calendars, currentMember]);
+
+    // Keyboard ESC to close
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Escape' && isOpen) {
+                onClose();
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [isOpen, onClose]);
+
+    // ⚡ Pratiklik: Şablon Uygulama (Apply Quick Template)
+    const handleApplyTemplate = (tmpl: CommitteeTemplate) => {
+        setTitle(tmpl.title);
+        setCalendarId(tmpl.calendarId);
+        setColor(tmpl.committeeColor);
+        setCategory(tmpl.category);
+        setLocation(tmpl.location);
+        setMeetingLink(tmpl.meetingLink || '');
+        setDescription(tmpl.description);
+
+        // Pre-fill subtasks
+        const templateSubtasks: WorkspaceSubtask[] = tmpl.subtasks.map((st, i) => ({
+            id: `tmpl_sub_${Date.now()}_${i}`,
+            event_id: event?.id || 'temp',
+            title: st,
+            is_completed: false,
+            created_at: new Date().toISOString()
+        }));
+        setSubtasks(templateSubtasks);
+
+        // Calculate end time automatically from template duration
+        if (startTime) {
+            const [hStr, mStr] = startTime.split(':');
+            const startD = new Date();
+            startD.setHours(Number(hStr), Number(mStr), 0, 0);
+            const endD = new Date(startD.getTime() + tmpl.durationMinutes * 60 * 1000);
+            setEndTime(endD.toTimeString().substring(0, 5));
+        }
+
+        // Show Flash Feedback
+        setAppliedTemplateFeedback(`✓ "${tmpl.label}" şablonu uygulandı! (${tmpl.committeeName} — ${tmpl.durationMinutes} Dk)`);
+        setTimeout(() => setAppliedTemplateFeedback(null), 6000);
+    };
+
+    // ⚡ Pratiklik: Toplantı Süresi Tek Tıkla Hesaplama (Duration Quick-Pick)
+    const handleSetDuration = (durationMinutes: number) => {
+        if (!startTime || !startDate) return;
+        const [h, m] = startTime.split(':').map(Number);
+        const [sy, sm, sd] = startDate.split('-').map(Number);
+        const sDate = new Date(sy, sm - 1, sd, h, m, 0);
+        const eDate = new Date(sDate.getTime() + durationMinutes * 60 * 1000);
+
+        setEndDate(formatLocalDate(eDate));
+        setEndTime(eDate.toTimeString().substring(0, 5));
+        setIsAllDay(false);
+    };
+
+    // ⚡ Akıllı Süre Göstergesi (Hesaplanan Süre)
+    const calculatedDurationStr = useMemo(() => {
+        if (isAllDay) return 'Tüm Gün';
+        if (!startDate || !endDate || !startTime || !endTime) return null;
+        try {
+            const [sy, sm, sd] = startDate.split('-').map(Number);
+            const [sh, smin] = startTime.split(':').map(Number);
+            const [ey, em, ed] = endDate.split('-').map(Number);
+            const [eh, emin] = endTime.split(':').map(Number);
+
+            const startMs = new Date(sy, sm - 1, sd, sh, smin).getTime();
+            const endMs = new Date(ey, em - 1, ed, eh, emin).getTime();
+            const diffMinutes = Math.round((endMs - startMs) / (1000 * 60));
+
+            if (diffMinutes <= 0) return 'Geçersiz zaman aralığı (Bitiş başlangıçtan önce)';
+            const hours = Math.floor(diffMinutes / 60);
+            const mins = diffMinutes % 60;
+            if (hours === 0) return `${mins} dakika`;
+            if (mins === 0) return `${hours} saat`;
+            return `${hours} saat ${mins} dakika`;
+        } catch {
+            return null;
+        }
+    }, [startDate, endDate, startTime, endTime, isAllDay]);
+
+    // ⚡ Etkinliğe Kalan Süre Rozeti
+    const timeRemainingBadge = useMemo(() => {
+        if (!event) return null;
+        const now = new Date();
+        const start = new Date(event.start_time);
+        const end = new Date(event.end_time);
+
+        if (now >= start && now <= end) {
+            return {
+                text: '🔴 Şu An Devam Ediyor',
+                style: 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400 animate-pulse font-bold'
+            };
+        }
+
+        const diffMs = start.getTime() - now.getTime();
+        if (diffMs < 0) {
+            return {
+                text: '⌛ Tamamlandı',
+                style: isLight ? 'bg-slate-100 border-slate-300 text-slate-500' : 'bg-zinc-800 border-zinc-700 text-zinc-500'
+            };
+        }
+
+        const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+        const diffHours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+        const diffMinutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+
+        if (diffDays === 0) {
+            if (diffHours === 0) {
+                return {
+                    text: `⏳ ${diffMinutes} dk kaldı`,
+                    style: 'bg-rose-500/10 border-rose-500/30 text-rose-400 font-bold'
+                };
+            }
+            return {
+                text: `⚡ Bugün ${start.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })} (${diffHours} sa kaldı)`,
+                style: 'bg-amber-500/10 border-amber-500/30 text-amber-400 font-bold'
+            };
+        } else if (diffDays === 1) {
+            return {
+                text: `📅 Yarın ${start.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })}`,
+                style: 'bg-sky-500/10 border-sky-500/30 text-sky-400 font-bold'
+            };
+        } else {
+            return {
+                text: `⏳ ${diffDays} gün kaldı`,
+                style: isLight ? 'bg-slate-100 border-slate-300 text-slate-700 font-semibold' : 'bg-zinc-800 border-zinc-700 text-zinc-300 font-semibold'
+            };
+        }
+    }, [event, isLight]);
+
+
+    // ⚡ Başlangıç Saati Değiştiğinde Akıllı Otomatik Öteleme
+    const handleStartTimeChange = (newStartTime: string) => {
+        setStartTime(newStartTime);
+        if (startDate === endDate && startTime && endTime) {
+            try {
+                const [oldSh, oldSm] = startTime.split(':').map(Number);
+                const [oldEh, oldEm] = endTime.split(':').map(Number);
+                const oldDuration = (oldEh * 60 + oldEm) - (oldSh * 60 + oldSm);
+                const safeDuration = oldDuration > 0 ? oldDuration : 60;
+
+                const [newSh, newSm] = newStartTime.split(':').map(Number);
+                const newEndTotalMins = newSh * 60 + newSm + safeDuration;
+                const newEh = Math.floor(newEndTotalMins / 60) % 24;
+                const newEm = newEndTotalMins % 60;
+                setEndTime(`${String(newEh).padStart(2, '0')}:${String(newEm).padStart(2, '0')}`);
+            } catch {
+                // Keep existing endTime
+            }
+        }
+    };
+
+    // ⚡ Başlangıç Tarihi Değiştiğinde Bitiş Tarihini Eşitleme
+    const handleStartDateChange = (newStartDate: string) => {
+        setStartDate(newStartDate);
+        if (endDate < newStartDate) {
+            setEndDate(newStartDate);
+        }
+    };
+
+    // ⚡ Pratiklik: Tarih Hızlı Kısayolları (Yerel Saat Güvenli)
+    const handleQuickDate = (preset: 'today' | 'tomorrow' | 'friday' | 'saturday' | 'sunday' | 'next_week') => {
+        const now = new Date();
+        const target = new Date();
+
+        if (preset === 'today') {
+            // Keep target as today
+        } else if (preset === 'tomorrow') {
+            target.setDate(now.getDate() + 1);
+        } else if (preset === 'friday') {
+            const day = now.getDay();
+            const diff = (5 - day + 7) % 7 || 7;
+            target.setDate(now.getDate() + diff);
+        } else if (preset === 'saturday') {
+            const day = now.getDay();
+            const diff = (6 - day + 7) % 7 || 7;
+            target.setDate(now.getDate() + diff);
+        } else if (preset === 'sunday') {
+            const day = now.getDay();
+            const diff = (7 - day + 7) % 7 || 7;
+            target.setDate(now.getDate() + diff);
+        } else if (preset === 'next_week') {
+            target.setDate(now.getDate() + 7);
+        }
+
+        const dateStr = formatLocalDate(target);
+        setStartDate(dateStr);
+        setEndDate(dateStr);
+    };
+
+    // ⚡ İzleyici / Üye Bireysel Katılım Bildirimi Gönderici
+    const handleMyRsvp = async (status: 'attending' | 'declined' | 'maybe', reasonText?: string) => {
+        if (!event || !currentMember) return;
+        setIsSubmittingMyRsvp(true);
+        setMyRsvpFeedback(null);
+        try {
+            const res = await fetch(`/api/workspace/events/${event.id}/attendance`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    status,
+                    reason: (status === 'declined' || status === 'maybe') ? (reasonText || myAttendanceReason) : undefined
+                })
+            });
+            const data = await res.json();
+            if (res.ok && data.success && data.event) {
+                setMyAttendanceStatus(status);
+                if (reasonText !== undefined) setMyAttendanceReason(reasonText);
+                setMemberAttendanceList(data.event.member_attendance || []);
+                setMyRsvpFeedback(status === 'attending' 
+                    ? '✅ Katılım durumunuz "Katılıyorum" olarak kaydedildi!' 
+                    : status === 'declined' 
+                        ? '❌ Katılamayacağınız gerekçenizle organizatöre iletildi.' 
+                        : '🟡 Kararsızlık durumunuz iletildi.');
+                if (onEventSaved) {
+                    onEventSaved(data.event);
+                }
+            } else {
+                setMyRsvpFeedback(`⚠️ Hata: ${data.error || 'İşlem başarısız'}`);
+            }
+        } catch {
+            setMyRsvpFeedback('⚠️ Sunucu ile bağlantı kurulamadı.');
+        } finally {
+            setIsSubmittingMyRsvp(false);
+        }
+    };
+
+    // ⚡ Pratiklik: Hazır Konum & Platform Seçici
+    const handleQuickLocation = (loc: string, link?: string) => {
+        setLocation(loc);
+        if (link !== undefined) {
+            setMeetingLink(link);
+        }
+    };
+
+    // ⚡ Pratiklik: Hazır Checklist Grupları Ekleme
+    const handleAddPresetChecklist = (groupType: 'tech' | 'event' | 'social') => {
+        const presets: Record<string, string[]> = {
+            tech: [
+                'GitHub PR ve issue review yapıldı',
+                'Kod testleri ve linter çalıştırıldı',
+                'Mimari güvenlik kontrolleri doğrulandı',
+                'Production deploy onayı verildi'
+            ],
+            event: [
+                'Konuşmacı teyidi ve sunum dosyası alındı',
+                'Salon tahsisi, ses ve projeksiyon hazırlandı',
+                'Katılım QR kodu ve kayıt listesi oluşturuldu',
+                'Etkinlik sonrası teşekkür belgesi iletildi'
+            ],
+            social: [
+                'Figma görsel ve banner tasarımı onaylandı',
+                'Instagram & Twitter gönderi metinleri yazıldı',
+                'Etkinlik gününde hikaye (Story) serisi paylaşıldı',
+                'Fotoğraf ve video arşivi Drive klasörüne yüklendi'
+            ]
+        };
+
+        const itemsToAdd = presets[groupType] || [];
+        const newItems: WorkspaceSubtask[] = itemsToAdd.map((title, i) => ({
+            id: `quick_sub_${Date.now()}_${i}`,
+            event_id: event?.id || 'temp',
+            title,
+            is_completed: false,
+            created_at: new Date().toISOString()
+        }));
+
+        setSubtasks(prev => [...prev, ...newItems]);
+    };
+
+    // Handle Save Event
+    const handleSave = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setErrorMsg(null);
+
+        if (!title.trim()) {
+            setActiveDrawerTab('general');
+            setErrorMsg('Lütfen etkinlik başlığını girin.');
+            return;
+        }
+
+        if (!startDate || !endDate) {
+            setActiveDrawerTab('datetime');
+            setErrorMsg('Başlangıç ve bitiş tarihlerini belirleyin.');
+            return;
+        }
+
+        setIsSaving(true);
+
+        const startISO = isAllDay
+            ? new Date(`${startDate}T00:00:00`).toISOString()
+            : new Date(`${startDate}T${startTime}:00`).toISOString();
+
+        const endISO = isAllDay
+            ? new Date(`${endDate}T23:59:59`).toISOString()
+            : new Date(`${endDate}T${endTime}:00`).toISOString();
+
+        const effectiveAssignees = visibility === 'custom' ? customVisibleMembers : assignees;
+
+        const payload: Partial<WorkspaceEvent> = {
+            calendar_id: calendarId,
+            title: title.trim(),
+            description: description.trim(),
+            start_time: startISO,
+            end_time: endISO,
+            is_all_day: isAllDay,
+            location: location.trim(),
+            meeting_link: meetingLink.trim() || undefined,
+            color: COMMITTEE_COLORS[calendarId] || color || '#ef4444',
+            category,
+            status,
+            visibility,
+            allowed_member_ids: visibility === 'custom' ? customVisibleMembers : undefined,
+            allowed_committee_ids: visibility === 'committee' ? customVisibleCommittees : undefined,
+            is_showcase: isShowcase,
+            rsvp_enabled: rsvpEnabled,
+            rsvp_qr_enabled: rsvpQrEnabled,
+            rsvp_capacity: rsvpCapacity ? Number(rsvpCapacity) : undefined,
+            reminders,
+            assignees: effectiveAssignees,
+            subtasks,
+            comments,
+            attachments,
+            version,
+            change_summary: event ? `"${title.trim()}" bilgileri güncellendi` : undefined,
+        };
+
+        try {
+            const url = event ? `/api/workspace/events/${event.id}` : '/api/workspace/events';
+            const method = event ? 'PUT' : 'POST';
+
+            const res = await fetch(url, {
+                method,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+
+            const data = await res.json();
+
+            if (res.status === 409) {
+                setErrorMsg('⚠️ Çakışma Hatası: Bu etkinlik başka bir yönetici tarafından güncellendi. Lütfen sayfayı yenileyip tekrar deneyin.');
+                setIsSaving(false);
+                return;
+            }
+
+            if (!res.ok) {
+                setErrorMsg(data.error || 'Etkinlik kaydedilirken bir hata oluştu.');
+                setIsSaving(false);
+                return;
+            }
+
+            if (data.event) {
+                onEventSaved(data.event);
+                onClose();
+            }
+        } catch (err: any) {
+            setErrorMsg(err.message || 'Sunucuyla bağlantı kurulamadı.');
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    // 🗓️ Google Calendar URL Üreteci
+    const getGoogleCalendarUrl = () => {
+        try {
+            const s = new Date(startDate ? `${startDate}T${startTime || '00:00'}:00` : Date.now()).toISOString().replace(/-|:|\.\d\d\d/g, '');
+            const e = new Date(endDate ? `${endDate}T${endTime || '23:59'}:00` : Date.now()).toISOString().replace(/-|:|\.\d\d\d/g, '');
+            const url = new URL('https://calendar.google.com/calendar/render');
+            url.searchParams.set('action', 'TEMPLATE');
+            url.searchParams.set('text', title || 'HSD MTÜ Topluluk Etkinliği');
+            url.searchParams.set('dates', `${s}/${e}`);
+            if (description) url.searchParams.set('details', description);
+            if (location || meetingLink) url.searchParams.set('location', location || meetingLink);
+            return url.toString();
+        } catch {
+            return 'https://calendar.google.com';
+        }
+    };
+
+    // 📥 Apple & Outlook .ICS Dosyası İndir
+    const handleDownloadICS = () => {
+        try {
+            const s = new Date(startDate ? `${startDate}T${startTime || '00:00'}:00` : Date.now()).toISOString().replace(/-|:|\.\d\d\d/g, '');
+            const e = new Date(endDate ? `${endDate}T${endTime || '23:59'}:00` : Date.now()).toISOString().replace(/-|:|\.\d\d\d/g, '');
+            const icsContent = [
+                'BEGIN:VCALENDAR',
+                'VERSION:2.0',
+                'PRODID:-//HSD MTU//Topluluk Takvimi//TR',
+                'CALSCALE:GREGORIAN',
+                'METHOD:PUBLISH',
+                'BEGIN:VEVENT',
+                `SUMMARY:${title || 'HSD MTÜ Etkinliği'}`,
+                `DESCRIPTION:${(description || '').replace(/\n/g, '\\n')}`,
+                `LOCATION:${location || meetingLink || 'MTÜ Kampüsü'}`,
+                `DTSTART:${s}`,
+                `DTEND:${e}`,
+                'STATUS:CONFIRMED',
+                'END:VEVENT',
+                'END:VCALENDAR'
+            ].join('\r\n');
+
+            const blob = new Blob([icsContent], { type: 'text/calendar;charset=utf-8' });
+            const link = document.createElement('a');
+            link.href = window.URL.createObjectURL(blob);
+            link.setAttribute('download', `${(title || 'hsd_etkinlik').replace(/[^a-zA-Z0-9]/g, '_')}.ics`);
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        } catch (err) {
+            console.error('ICS oluşturma hatası:', err);
+        }
+    };
+
+    // 📢 Discord & Meet Webhook İletimi
+    const handleSendWebhook = async () => {
+        setIsSendingWebhook(true);
+        setWebhookFeedback(null);
+        try {
+            const res = await fetch('/api/workspace/webhook', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    event_id: event?.id,
+                    title: title.trim() || 'Topluluk Etkinliği',
+                    description: description.trim(),
+                    start_time: startDate ? `${startDate}T${startTime}:00` : undefined,
+                    end_time: endDate ? `${endDate}T${endTime}:00` : undefined,
+                    location: location.trim(),
+                    meeting_link: meetingLink.trim()
+                })
+            });
+            const data = await res.json();
+            if (res.ok) {
+                setWebhookFeedback('✓ Etkinlik başarıyla Discord / Webhook kanalına duyuruldu!');
+            } else {
+                setWebhookFeedback(`⚠️ ${data.error || 'Webhook duyurusu gönderilemedi.'}`);
+            }
+        } catch (err: any) {
+            setWebhookFeedback('⚠️ Bağlantı hatası: Webhook gönderilemedi.');
+        } finally {
+            setIsSendingWebhook(false);
+            setTimeout(() => setWebhookFeedback(null), 6000);
+        }
+    };
+
+    // 📊 Katılımcı Listesini CSV Olarak Dışa Aktar (Excel Uyumlu UTF-8 BOM)
+    const handleExportCSV = () => {
+        if (!attendees.length) return;
+        const headers = ['Ad Soyad', 'E-posta', 'Öğrenci No', 'Bölüm', 'Bilet Kodu', 'Durum', 'Kayıt Tarihi'];
+        const rows = attendees.map(a => [
+            `"${(a.full_name || '').replace(/"/g, '""')}"`,
+            `"${(a.email || '').replace(/"/g, '""')}"`,
+            `"${(a.student_number || '').replace(/"/g, '""')}"`,
+            `"${(a.department || '').replace(/"/g, '""')}"`,
+            `"${a.ticket_code || ''}"`,
+            `"${a.status === 'checked_in' ? 'Katıldı' : 'Kayıtlı'}"`,
+            `"${new Date(a.created_at).toLocaleString('tr-TR')}"`
+        ]);
+        const csvContent = '\uFEFF' + [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.setAttribute('download', `${(title || 'etkinlik').replace(/[^a-zA-Z0-9]/g, '_')}_katilimcilar.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    };
+
+    // 🎟️ Katılımcı Check-in Durumu Güncelle
+    const handleToggleCheckIn = async (attendeeId: string, currentStatus: string) => {
+        const nextStatus = currentStatus === 'checked_in' ? 'registered' : 'checked_in';
+        try {
+            const res = await fetch('/api/workspace/rsvp', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ attendee_id: attendeeId, status: nextStatus })
+            });
+            if (res.ok) {
+                setAttendees(prev => prev.map(a => a.id === attendeeId ? { ...a, status: nextStatus as any, checked_in_at: nextStatus === 'checked_in' ? new Date().toISOString() : undefined } : a));
+            }
+        } catch (err) {
+            console.error('Check-in güncelleme hatası:', err);
+        }
+    };
+
+    // Handle Delete Event
+    const handleDelete = async () => {
+        if (!event) return;
+        if (!confirm(`"${event.title}" etkinliğini silmek istediğinize emin misiniz?`)) return;
+
+        setIsDeleting(true);
+        setErrorMsg(null);
+
+        try {
+            const res = await fetch(`/api/workspace/events/${event.id}`, { method: 'DELETE' });
+            if (res.ok) {
+                onEventDeleted(event.id);
+                onClose();
+            } else {
+                const data = await res.json();
+                setErrorMsg(data.error || 'Etkinlik silinemedi.');
+            }
+        } catch (err: any) {
+            setErrorMsg(err.message || 'Silme işlemi sırasında hata oluştu.');
+        } finally {
+            setIsDeleting(false);
+        }
+    };
+
+    // Subtask Handlers
+    const handleAddSubtask = (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!newSubtaskTitle.trim()) return;
+
+        const newSt: WorkspaceSubtask = {
+            id: `sub_${Date.now()}`,
+            event_id: event?.id || 'temp',
+            title: newSubtaskTitle.trim(),
+            is_completed: false,
+            created_at: new Date().toISOString()
+        };
+
+        setSubtasks([...subtasks, newSt]);
+        setNewSubtaskTitle('');
+    };
+
+    const handleToggleSubtask = (id: string, currentVal: boolean) => {
+        setSubtasks(subtasks.map(st => st.id === id ? { ...st, is_completed: !currentVal } : st));
+    };
+
+    const handleDeleteSubtask = (id: string) => {
+        setSubtasks(subtasks.filter(st => st.id !== id));
+    };
+
+    const handleToggleAllSubtasks = () => {
+        const allCompleted = subtasks.every(s => s.is_completed);
+        setSubtasks(subtasks.map(s => ({ ...s, is_completed: !allCompleted })));
+    };
+
+    const handleClearCompletedSubtasks = () => {
+        setSubtasks(subtasks.filter(s => !s.is_completed));
+    };
+
+    // Reminder Handlers
+    const handleAddReminder = (minutesBefore: number, target: 'all' | 'admins' | 'assignees' = 'all') => {
+        const newRem: WorkspaceReminder = {
+            id: `rem_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+            event_id: event?.id,
+            minutes_before: minutesBefore,
+            target,
+            is_sent: false,
+        };
+        setReminders(prev => [...prev, newRem]);
+    };
+
+    const handleRemoveReminder = (id: string) => {
+        setReminders(prev => prev.filter(r => r.id !== id));
+    };
+
+    const handleTestInstantReminder = async () => {
+        setIsTestingReminder(true);
+        setReminderTestSuccess(false);
+
+        // 1. Browser Native Notification test if supported & allowed
+        if (typeof window !== 'undefined' && 'Notification' in window) {
+            if (Notification.permission === 'granted') {
+                new Notification(`🔔 HSD Hatırlatıcı: ${title || 'Topluluk Etkinliği'}`, {
+                    body: `${startDate || 'Yakında'} • ${startTime || '10:00'} - ${location || 'Online'}`,
+                    icon: '/favicon.ico',
+                });
+            } else if (Notification.permission !== 'denied') {
+                Notification.requestPermission().then(permission => {
+                    if (permission === 'granted') {
+                        new Notification(`🔔 HSD Hatırlatıcı: ${title || 'Topluluk Etkinliği'}`, {
+                            body: `${startDate || 'Yakında'} • ${startTime || '10:00'} - ${location || 'Online'}`,
+                            icon: '/favicon.ico',
+                        });
+                    }
+                });
+            }
+        }
+
+        // 2. Dispatch simulated reminder to notification center
+        try {
+            await fetch('/api/workspace/notifications', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    eventId: event?.id,
+                    eventTitle: title || 'Topluluk Etkinliği',
+                    title: `⏰ Etkinlik Hatırlatıcısı: ${title || 'Topluluk Etkinliği'}`,
+                    message: `Bu etkinlik için test hatırlatıcısı tetiklendi. Başlangıç: ${startDate || 'Belirtilmedi'} ${startTime || ''}. Katılım linki/konumu: ${location || meetingLink || 'Belirlenmedi'}.`,
+                    targetAudience: 'all',
+                    type: 'reminder',
+                }),
+            });
+            setReminderTestSuccess(true);
+            setTimeout(() => setReminderTestSuccess(false), 4500);
+        } catch (err) {
+            console.error('Hatırlatıcı test hatası:', err);
+        } finally {
+            setIsTestingReminder(false);
+        }
+    };
+
+    // Comment Handlers
+    const handleAddComment = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!newCommentText.trim() || isAddingComment) return;
+
+        setCommentError(null);
+        setIsAddingComment(true);
+
+        const tempId = `com_${Date.now()}`;
+        const newCom: WorkspaceComment = {
+            id: tempId,
+            event_id: event?.id || 'temp',
+            user_id: currentMember?.id || 'anon',
+            user_name: currentMember?.display_name || 'Topluluk Yöneticisi',
+            user_avatar: currentMember?.avatar_url,
+            content: newCommentText.trim(),
+            created_at: new Date().toISOString(),
+            tag: newCommentTag,
+            is_pinned: false,
+            reactions: {},
+        };
+
+        const submittedText = newCommentText.trim();
+        setComments(prev => [...prev, newCom]);
+        setNewCommentText('');
+
+        if (event?.id) {
+            try {
+                const res = await fetch(`/api/workspace/events/${event.id}/comments`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content: submittedText, tag: newCommentTag }),
+                });
+                const data = await res.json();
+                if (res.ok && data.comment) {
+                    setComments(prev => prev.map(c => c.id === tempId ? data.comment : c));
+                    if (event) {
+                        const updated = {
+                            ...event,
+                            comments: [...(event.comments || []).filter(c => c.id !== tempId), data.comment]
+                        };
+                        onEventSaved(updated);
+                    }
+                } else {
+                    setComments(prev => prev.filter(c => c.id !== tempId));
+                    setCommentError(data.error || 'Yorum kaydedilemedi. Lütfen tekrar deneyin.');
+                }
+            } catch (err: any) {
+                console.error('Yorum API hatası:', err);
+                setComments(prev => prev.filter(c => c.id !== tempId));
+                setCommentError('Bağlantı hatası: Yorum sunucuya iletilemedi.');
+            } finally {
+                setIsAddingComment(false);
+            }
+        } else {
+            setIsAddingComment(false);
+        }
+    };
+
+    const handleToggleCommentPin = async (commentId: string) => {
+        setComments(prev => prev.map(c => c.id === commentId ? { ...c, is_pinned: !c.is_pinned } : c));
+        if (event?.id) {
+            try {
+                await fetch(`/api/workspace/events/${event.id}/comments`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ commentId, action: 'toggle_pin' }),
+                });
+            } catch (err) {
+                console.error('Pin hatası:', err);
+            }
+        }
+    };
+
+    const handleToggleCommentReaction = async (commentId: string, emoji: string) => {
+        const userId = currentMember?.id || 'anon';
+        setComments(prev => prev.map(c => {
+            if (c.id !== commentId) return c;
+            const rx = { ...(c.reactions || {}) };
+            const currentUsers = rx[emoji] || [];
+            if (currentUsers.includes(userId)) {
+                rx[emoji] = currentUsers.filter(u => u !== userId);
+                if (rx[emoji].length === 0) delete rx[emoji];
+            } else {
+                rx[emoji] = [...currentUsers, userId];
+            }
+            return { ...c, reactions: rx };
+        }));
+
+        if (event?.id) {
+            try {
+                await fetch(`/api/workspace/events/${event.id}/comments`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ commentId, action: 'toggle_reaction', emoji }),
+                });
+            } catch (err) {
+                console.error('Reaksiyon hatası:', err);
+            }
+        }
+    };
+
+    const handleDeleteComment = async (commentId: string) => {
+        if (!confirm('Bu yorumu silmek istediğinize emin misiniz?')) return;
+        setComments(prev => prev.filter(c => c.id !== commentId));
+        if (event?.id) {
+            try {
+                await fetch(`/api/workspace/events/${event.id}/comments?commentId=${commentId}`, {
+                    method: 'DELETE',
+                });
+            } catch (err) {
+                console.error('Yorum silme hatası:', err);
+            }
+        }
+    };
+
+    // File Upload Handler with Progress Ring
+    const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+
+        setIsUploading(true);
+        setUploadingFileName(file.name);
+        setUploadProgress(15);
+        setErrorMsg(null);
+
+        const progressTimer = setInterval(() => {
+            setUploadProgress(prev => {
+                if (prev >= 88) return prev;
+                return prev + Math.floor(Math.random() * 10) + 6;
+            });
+        }, 120);
+
+        const formData = new FormData();
+        formData.append('file', file);
+        if (event?.id) formData.append('eventId', event.id);
+
+        try {
+            const res = await fetch('/api/workspace/files/upload', {
+                method: 'POST',
+                body: formData,
+            });
+            const data = await res.json();
+            clearInterval(progressTimer);
+
+            if (res.ok && data.file) {
+                setUploadProgress(100);
+                setTimeout(() => {
+                    setAttachments(prev => [...prev, data.file]);
+                    if (event?.id) setVersion(v => v + 1);
+                    setIsUploading(false);
+                    setUploadProgress(0);
+                    setUploadingFileName('');
+                }, 500);
+            } else {
+                setIsUploading(false);
+                setUploadProgress(0);
+                setErrorMsg(data.error || 'Dosya yüklenemedi.');
+            }
+        } catch (err: any) {
+            clearInterval(progressTimer);
+            setIsUploading(false);
+            setUploadProgress(0);
+            setErrorMsg(err.message || 'Yükleme sırasında hata oluştu.');
+        } finally {
+            e.target.value = '';
+        }
+    };
+
+    // Instant Announcement Handler
+    const handleSendInstantAnnouncement = async () => {
+        if (!title.trim()) {
+            alert('Lütfen önce etkinliğe bir başlık verin.');
+            return;
+        }
+
+        setIsSendingAnnouncement(true);
+        setAnnouncementSuccess(false);
+
+        try {
+            const messageText = announcementMsg.trim() ||
+                `"${title}" etkinliği için hatırlatma: ${startDate} tarihinde saat ${startTime}'da gerçekleşecektir. (${location || 'Online'})`;
+
+            const res = await fetch('/api/workspace/notifications', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    eventId: event?.id,
+                    eventTitle: title,
+                    title: `⚡ Duyuru: ${title}`,
+                    message: messageText,
+                    targetAudience: announcementAudience,
+                    targetGroupId: announcementAudience === 'group' ? selectedGroupId : undefined,
+                    targetRole: announcementAudience === 'role' ? selectedRole : undefined,
+                    type: 'urgent',
+                }),
+            });
+
+            const data = await res.json();
+            if (res.ok) {
+                setAnnouncementSuccess(true);
+                setAnnouncementMsg('');
+                setTimeout(() => setAnnouncementSuccess(false), 5000);
+            } else {
+                alert(data.error || 'Duyuru gönderilemedi.');
+            }
+        } catch (err) {
+            console.error('Duyuru hatası:', err);
+            alert('Sunucuyla iletişim kurulamadı.');
+        } finally {
+            setIsSendingAnnouncement(false);
+        }
+    };
+
+    const completedSubtasksCount = subtasks.filter(s => s.is_completed).length;
+    const progressPercent = subtasks.length > 0
+        ? Math.round((completedSubtasksCount / subtasks.length) * 100)
+        : 0;
+
+    // React Rules of Hooks: Render guard only after ALL hooks have been called unconditionally
+    if (!isOpen) return null;
+
+    return (
+        <div className={`fixed inset-0 z-50 overflow-hidden backdrop-blur-sm transition-opacity animate-in fade-in duration-200 ${
+            isLight ? 'bg-slate-900/40' : 'bg-black/80'
+        }`}>
+            <div className="absolute inset-y-0 right-0 flex max-w-full pl-4 sm:pl-10">
+                <div className={`w-screen max-w-2xl border-l shadow-2xl flex flex-col h-full transition-colors ${
+                    isLight ? 'bg-white border-slate-200 text-slate-800' : 'bg-zinc-950 border-zinc-800 text-zinc-100'
+                }`}>
+
+                    {/* ── 1. HEADER (Yüksek Kontrast & Kolay Okunabilirlik) ── */}
+                    <div className={`flex items-center justify-between px-6 py-4 border-b backdrop-blur-md shrink-0 ${
+                        isLight ? 'bg-slate-50/95 border-slate-200 text-slate-900' : 'bg-zinc-900/90 border-zinc-800 text-white'
+                    }`}>
+                        <div className="flex items-center gap-3">
+                            <span
+                                className="w-4 h-4 rounded-full inline-block shadow-md ring-2 ring-white/30 shrink-0"
+                                style={{ backgroundColor: color }}
+                            />
+                            <div>
+                                <h2 className={`text-base sm:text-lg font-bold tracking-tight flex items-center gap-2 ${
+                                    isLight ? 'text-slate-900' : 'text-white'
+                                }`}>
+                                    {isReadOnly ? 'Etkinliği Görüntüle' : (event ? 'Etkinliği Düzenle' : 'Yeni Topluluk Etkinliği')}
+                                    <span className={`text-xs font-semibold px-2.5 py-0.5 rounded-full font-mono border ${
+                                        isLight ? 'bg-slate-100 text-slate-700 border-slate-300' : 'bg-zinc-800 text-rose-300 border-zinc-700/80'
+                                    }`}>
+                                        {category}
+                                    </span>
+                                    {!isReadOnly && event && isCreator && (
+                                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400">
+                                            Düzenleyici
+                                        </span>
+                                    )}
+                                    {isShowcase ? (
+                                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-500 flex items-center gap-1">
+                                            <span>🌟</span> Ana Sayfada Yayında
+                                        </span>
+                                    ) : (
+                                        <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full border ${
+                                            isLight ? 'bg-slate-100 border-slate-200 text-slate-500' : 'bg-zinc-800/80 border-zinc-700 text-zinc-400'
+                                        }`}>
+                                            🔒 Yalnızca Çalışma Alanı
+                                        </span>
+                                    )}
+                                </h2>
+                                <p className={`text-xs font-medium ${isLight ? 'text-slate-500' : 'text-zinc-400'}`}>
+                                    HSD Malatya Turgut Özal Üniversitesi Çekirdek Ekip Çalışma Alanı
+                                </p>
+                            </div>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                            {timeRemainingBadge && (
+                                <span className={`text-xs px-2.5 py-1 rounded-lg font-mono border font-semibold flex items-center gap-1.5 shadow-xs ${timeRemainingBadge.style}`}>
+                                    {timeRemainingBadge.text}
+                                </span>
+                            )}
+                            <button
+                                type="button"
+                                onClick={onClose}
+                                className={`p-2 rounded-xl transition-colors ${
+                                    isLight ? 'text-slate-400 hover:text-slate-700 hover:bg-slate-100' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'
+                                }`}
+                                title="Kapat (Esc)"
+                            >
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+                                    <line x1="18" y1="6" x2="6" y2="18" />
+                                    <line x1="6" y1="6" x2="18" y2="18" />
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* ── 1.5. SEKME ÇUBUĞU (TAB NAVIGATION - Yalnızca Düzenleme Modunda) ── */}
+                    {!isReadOnly && (
+                        <div className={`flex flex-wrap items-center gap-1.5 px-6 py-2.5 border-b shrink-0 ${
+                            isLight ? 'bg-slate-100/95 border-slate-200' : 'bg-zinc-900/80 border-zinc-800'
+                        }`}>
+                            {[
+                                { id: 'general', label: 'Etkinlik & Zamanlama', icon: '📝' },
+                                { id: 'access', label: 'Erişim (RBAC)', icon: '🛡️', badge: visibility === 'admin_only' ? 'Admin' : visibility === 'private' ? 'Özel' : visibility === 'committee' ? `${customVisibleCommittees.length} Komite` : visibility === 'custom' ? `${customVisibleMembers.length} Üye` : undefined },
+                                { 
+                                    id: 'tasks', 
+                                    label: 'Görevler & Dosyalar', 
+                                    icon: '✅', 
+                                    badge: subtasks.length > 0 
+                                        ? `${subtasks.filter(s => s.is_completed).length}/${subtasks.length}` 
+                                        : (attachments.length > 0 ? `${attachments.length}` : undefined) 
+                                },
+                                { 
+                                    id: 'rsvp', 
+                                    label: 'Kayıt (RSVP)', 
+                                    icon: '🎟️', 
+                                    badge: (attendees.length || 0) + (memberAttendanceList.length || 0) > 0 ? `${(attendees.length || 0) + (memberAttendanceList.length || 0)}` : undefined 
+                                },
+                                { id: 'communication', label: 'İletişim & Notlar', icon: '💬', badge: comments.length > 0 ? `${comments.length}` : undefined },
+                                { id: 'all', label: 'Tümü (Tek Sayfa)', icon: '📄' },
+                            ].map(tab => {
+                                const isActive = activeDrawerTab === tab.id;
+                                return (
+                                    <button
+                                        key={tab.id}
+                                        type="button"
+                                        onClick={() => setActiveDrawerTab(tab.id as DrawerTab)}
+                                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
+                                            isActive
+                                                ? isLight
+                                                    ? 'bg-white text-rose-600 shadow-sm border border-slate-200 ring-1 ring-rose-500/20'
+                                                    : 'bg-zinc-800 text-rose-400 shadow-md border border-zinc-700 ring-1 ring-rose-500/30'
+                                                : isLight
+                                                    ? 'text-slate-600 hover:text-slate-900 hover:bg-white/60'
+                                                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60'
+                                        }`}
+                                    >
+                                        <span>{tab.icon}</span>
+                                        <span>{tab.label}</span>
+                                        {tab.badge && (
+                                            <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded-full font-bold ${
+                                                isActive
+                                                    ? 'bg-rose-500 text-white'
+                                                    : isLight
+                                                        ? 'bg-slate-200 text-slate-700'
+                                                        : 'bg-zinc-950 text-zinc-400'
+                                            }`}>
+                                                {tab.badge}
+                                            </span>
+                                        )}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    )}
+
+                    {/* ── 2. SCROLLABLE BODY ── */}
+                    <div className="flex-1 overflow-y-auto px-6 py-5 space-y-6">
+
+                        {/* Hata Bildirimi */}
+                        {errorMsg && (
+                            <div className="p-3.5 rounded-xl bg-rose-950/90 border border-rose-700 text-rose-100 text-xs font-semibold flex items-start gap-2.5 shadow-md">
+                                <svg className="w-4 h-4 shrink-0 text-rose-300 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
+                                <span>{errorMsg}</span>
+                            </div>
+                        )}
+
+                        {/* Geçmiş Etkinlik Uyarısı */}
+                        {isEventPast && (
+                            <div className={`p-3.5 rounded-xl border text-xs flex items-start gap-2.5 shadow-md ${
+                                canEditPast 
+                                    ? 'bg-amber-950/40 border-amber-800/60 text-amber-200' 
+                                    : 'bg-zinc-900 border-zinc-700 text-zinc-300'
+                            }`}>
+                                <span className="text-amber-400 font-bold text-sm shrink-0">⏳</span>
+                                <div>
+                                    <span className="font-semibold block">Bu etkinlik geçmiş bir tarihe aittir ({startDate}).</span>
+                                    {!canEditPast && (
+                                        <span className="text-zinc-400 text-[11px] block mt-0.5">
+                                            Geçmiş etkinlikler yalnızca sistem ve komite yöneticileri tarafından düzenlenebilir (salt okunur mod).
+                                        </span>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
+                        {isReadOnly && event ? (
+                            <EventReadOnlyView
+                                event={event}
+                                currentMember={currentMember}
+                                members={members}
+                                isLight={isLight}
+                                startDate={startDate}
+                                startTime={startTime}
+                                endDate={endDate}
+                                endTime={endTime}
+                                isAllDay={isAllDay}
+                                calculatedDurationStr={calculatedDurationStr}
+                                location={location}
+                                meetingLink={meetingLink}
+                                description={description}
+                                subtasks={subtasks}
+                                attachments={attachments}
+                                comments={comments}
+                                myAttendanceStatus={myAttendanceStatus}
+                                myAttendanceReason={myAttendanceReason}
+                                isSubmittingMyRsvp={isSubmittingMyRsvp}
+                                myRsvpFeedback={myRsvpFeedback}
+                                onMyRsvp={handleMyRsvp}
+                                canComment={canComment}
+                                newCommentText={newCommentText}
+                                onNewCommentTextChange={setNewCommentText}
+                                onAddComment={() => handleAddComment({ preventDefault: () => {} } as React.FormEvent)}
+                            />
+                        ) : (
+                            <>
+                                {/* Flash Şablon Başarı Bildirimi */}
+                                {appliedTemplateFeedback && (
+                            <div className="p-3.5 rounded-xl bg-emerald-950/80 border border-emerald-600 text-emerald-200 text-xs font-bold flex items-center justify-between shadow-md animate-in fade-in slide-in-from-top-1">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-base text-emerald-400">⚡</span>
+                                    <span>{appliedTemplateFeedback}</span>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => setAppliedTemplateFeedback(null)}
+                                    className="text-emerald-400 hover:text-emerald-200 font-bold ml-2"
+                                >
+                                    ✕
+                                </button>
+                            </div>
+                        )}
+
+                        {/* ── PRATİKLİK MERKEZİ: HIZLI KOMİTE ŞABLONLARI (Kullanıcı Dostu Açılır/Kapanır) ── */}
+                        {!event && (activeDrawerTab === 'general' || activeDrawerTab === 'all') && (
+                            <div className={`p-4 rounded-2xl shadow-sm space-y-3.5 transition-colors ${
+                                isLight
+                                    ? 'bg-gradient-to-br from-rose-50/40 via-white to-slate-50 border border-slate-200'
+                                    : 'bg-gradient-to-br from-zinc-900 via-zinc-900/90 to-zinc-950 border border-zinc-700/80 shadow-md'
+                            }`}>
+                                <div className={`flex items-center justify-between pb-2.5 border-b ${
+                                    isLight ? 'border-slate-200' : 'border-zinc-800'
+                                }`}>
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-rose-500 text-base">⚡</span>
+                                        <span className={`text-xs font-bold uppercase tracking-wider ${
+                                            isLight ? 'text-slate-800' : 'text-white'
+                                        }`}>
+                                            Komite Hızlı Etkinlik Şablonları (Tek Tıkla Kur)
+                                        </span>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <span className={`text-[11px] font-mono font-semibold ${
+                                            isLight ? 'text-slate-500' : 'text-zinc-400'
+                                        }`}>
+                                            {filteredTemplates.length} Hazır Şablon
+                                        </span>
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowTemplates(!showTemplates)}
+                                            className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition-colors cursor-pointer ${
+                                                isLight 
+                                                    ? 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-300' 
+                                                    : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border-zinc-700'
+                                            }`}
+                                        >
+                                            {showTemplates ? 'Gizle ▲' : 'Şablonları Göster ▼'}
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {showTemplates && (
+                                    <>
+                                        {/* Komite Filtre Sekmeleri */}
+                                        <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
+                                            {[
+                                                { id: 'all', label: 'Tümü (18)' },
+                                                { id: 'proj', label: '🟣 Proje (5)' },
+                                                { id: 'event', label: '🔴 Etkinlik (5)' },
+                                                { id: 'social', label: '🌸 Sosyal (4)' },
+                                                { id: 'medium', label: '🟠 Medium (4)' },
+                                            ].map(tab => (
+                                                <button
+                                                    key={tab.id}
+                                                    type="button"
+                                                    onClick={() => setActiveCommitteeTab(tab.id as any)}
+                                                    className={`px-2 py-1.5 rounded-lg text-xs font-bold transition-all text-center ${
+                                                        activeCommitteeTab === tab.id
+                                                            ? 'bg-rose-600 text-white shadow-sm'
+                                                            : isLight
+                                                                ? 'bg-white text-slate-600 hover:text-slate-900 border border-slate-200 hover:bg-slate-100 shadow-xs'
+                                                                : 'bg-zinc-950 text-zinc-400 hover:text-zinc-200 border border-zinc-800 hover:border-zinc-700'
+                                                    }`}
+                                                >
+                                                    {tab.label}
+                                                </button>
+                                            ))}
+                                        </div>
+
+                                        {/* Şablon Kartları (Yüksek Kontrast & Net Okunabilirlik) */}
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-56 overflow-y-auto pr-1">
+                                            {filteredTemplates.map(tmpl => (
+                                                <button
+                                                    key={tmpl.id}
+                                                    type="button"
+                                                    onClick={() => handleApplyTemplate(tmpl)}
+                                                    className={`text-left p-2.5 rounded-xl transition-all group flex items-start gap-2.5 relative border ${
+                                                        isLight
+                                                            ? 'bg-white border-slate-200 hover:border-rose-400 hover:bg-rose-50/30 shadow-xs'
+                                                            : 'bg-zinc-950 border border-zinc-800 hover:border-zinc-600 hover:bg-zinc-900'
+                                                    }`}
+                                                >
+                                                    <span
+                                                        className="w-3 h-3 rounded-full mt-0.5 shrink-0 group-hover:scale-125 transition-transform ring-1 ring-white/20"
+                                                        style={{ backgroundColor: tmpl.committeeColor }}
+                                                    />
+                                                    <div className="overflow-hidden flex-1">
+                                                        <div className="flex items-center justify-between gap-1">
+                                                            <p className={`text-xs font-bold truncate ${
+                                                                isLight ? 'text-slate-800 group-hover:text-rose-600' : 'text-zinc-100 group-hover:text-white'
+                                                            }`}>
+                                                                {tmpl.label}
+                                                            </p>
+                                                            <span className={`text-[10px] font-mono shrink-0 ${
+                                                                isLight ? 'text-slate-500' : 'text-zinc-400'
+                                                            }`}>
+                                                                {tmpl.durationMinutes} Dk
+                                                            </span>
+                                                        </div>
+                                                        <p className={`text-[11px] font-medium truncate mt-0.5 ${
+                                                            isLight ? 'text-slate-500' : 'text-zinc-400'
+                                                        }`}>
+                                                            {tmpl.committeeName} • {tmpl.category}
+                                                        </p>
+                                                    </div>
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </>
+                                )}
+                            </div>
+                        )}
+
+                        <form id="event-form" onSubmit={handleSave} className="space-y-6">
+
+                            {/* ── SEKMELER: 1. GENEL BİLGİLER BÖLÜMÜ ── */}
+                            {(activeDrawerTab === 'general' || activeDrawerTab === 'all') && (
+                                <>
+                                    {activeDrawerTab === 'all' && (
+                                        <div className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold border ${
+                                            isLight ? 'bg-slate-100 text-slate-800 border-slate-200' : 'bg-zinc-800/80 text-zinc-200 border-zinc-700'
+                                        }`}>
+                                            <span>📝 1. Temel Bilgiler</span>
+                                        </div>
+                                    )}
+                                    {/* ── BÖLÜM 0: ETKİNLİĞİ EKLEYEN ÜYE & OLUŞTURULMA BİLGİSİ ── */}
+                            {(() => {
+                                const creatorMember = members.find(m => m.id === event?.created_by);
+                                const creatorName = creatorMember?.display_name || creatorMember?.full_name || event?.created_by || (event ? 'Topluluk Üyesi' : (currentMember?.display_name || 'Siz'));
+                                const creatorRole = creatorMember?.role || (event ? 'member' : (currentMember?.role || 'member'));
+                                const creatorAvatar = creatorMember?.avatar_url || (event ? null : currentMember?.avatar_url);
+
+                                return (
+                                    <div className={`p-3.5 rounded-2xl border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 transition-colors ${
+                                        isLight
+                                            ? 'bg-slate-50/90 border-slate-200'
+                                            : 'bg-zinc-900/60 border-zinc-800'
+                                    }`}>
+                                        <div className="flex items-center gap-3">
+                                            {creatorAvatar ? (
+                                                <img
+                                                    src={creatorAvatar}
+                                                    alt={creatorName}
+                                                    className="w-10 h-10 rounded-xl object-cover ring-2 ring-rose-500/30 shadow-sm"
+                                                />
+                                            ) : (
+                                                <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-rose-600 via-rose-500 to-amber-500 flex items-center justify-center text-xs font-bold text-white shadow-sm ring-1 ring-white/20">
+                                                    {creatorName.substring(0, 2).toUpperCase()}
+                                                </div>
+                                            )}
+                                            <div className="space-y-0.5">
+                                                <div className="flex items-center gap-2">
+                                                    <span className={`text-xs font-bold ${isLight ? 'text-slate-900' : 'text-white'}`}>
+                                                        {event ? creatorName : `${creatorName} (Yeni Ekleyen)`}
+                                                    </span>
+                                                    <span className={`text-[10px] font-mono px-2 py-0.5 rounded-md font-semibold ${
+                                                        creatorRole === 'super_admin'
+                                                            ? isLight ? 'bg-amber-100 text-amber-800' : 'bg-amber-950/60 text-amber-300'
+                                                            : creatorRole === 'workspace_admin'
+                                                                ? isLight ? 'bg-rose-100 text-rose-800' : 'bg-rose-950/60 text-rose-300'
+                                                                : creatorRole === 'editor'
+                                                                    ? isLight ? 'bg-blue-100 text-blue-800' : 'bg-blue-950/60 text-blue-300'
+                                                                    : isLight ? 'bg-slate-200/80 text-slate-700' : 'bg-zinc-800 text-zinc-300'
+                                                    }`}>
+                                                        {creatorRole === 'super_admin' ? '👑 Admin' : creatorRole === 'workspace_admin' ? '🛡️ Yönetici' : creatorRole === 'editor' ? '✍️ Editör' : 'Üye'}
+                                                    </span>
+                                                </div>
+                                                <p className={`text-[11px] ${isLight ? 'text-slate-500' : 'text-zinc-400'}`}>
+                                                    {event ? (
+                                                        <>Etkinliği Ekleyen Üye • {new Date(event.created_at || Date.now()).toLocaleDateString('tr-TR', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</>
+                                                    ) : (
+                                                        <>Bu etkinlik profiliniz ({currentMember?.display_name || 'Oturum Açan Üye'}) adına takvime kaydedilecek.</>
+                                                    )}
+                                                </p>
+                                            </div>
+                                        </div>
+
+                                        {event?.edit_history && event.edit_history.length > 0 && (
+                                            <div className={`px-2.5 py-1 rounded-xl text-[11px] font-semibold border flex items-center gap-1.5 shrink-0 ${
+                                                isLight
+                                                    ? 'bg-white border-slate-200 text-slate-700 shadow-xs'
+                                                    : 'bg-zinc-950 border-zinc-800 text-zinc-300'
+                                            }`}>
+                                                <span className="text-amber-500">✎</span>
+                                                <span>{event.edit_history.length} Kez Düzenlendi</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })()}
+
+                            {/* ── BÖLÜM 1: ETKİNLİK BAŞLIĞI ── */}
+                            <div className="space-y-1.5">
+                                <label className={`block text-xs font-bold uppercase tracking-wider ${
+                                    isLight ? 'text-slate-700' : 'text-zinc-200'
+                                }`}>
+                                    Etkinlik Başlığı <span className="text-rose-500">*</span>
+                                </label>
+                                <input
+                                    type="text"
+                                    value={title}
+                                    onChange={(e) => setTitle(e.target.value)}
+                                    placeholder="Örn: HSD Haftalık Çekirdek Ekip Sprint & Koordinasyon Toplantısı..."
+                                    className={`w-full text-base sm:text-lg font-bold rounded-xl px-4 py-3 transition-all ${
+                                        isLight
+                                            ? 'bg-slate-50 border border-slate-300 text-slate-900 placeholder-slate-400 focus:outline-none focus:border-rose-500 focus:ring-1 focus:ring-rose-500 shadow-xs'
+                                            : 'bg-zinc-900 border border-zinc-700 text-white placeholder-zinc-500 focus:outline-none focus:border-rose-500 focus:ring-1 focus:ring-rose-500 shadow-inner'
+                                    }`}
+                                    autoFocus={!event}
+                                    required
+                                />
+                            </div>
+
+                            {/* ── BÖLÜM 2: KOMİTE / TAKVİM, KATEGORİ & RENK ── */}
+                            <div className={`p-4 rounded-2xl space-y-4 transition-colors ${
+                                isLight
+                                    ? 'bg-slate-50/80 border border-slate-200'
+                                    : 'bg-zinc-900/70 border border-zinc-800'
+                            }`}>
+                                <div className={`flex items-center gap-2 pb-2 border-b ${
+                                    isLight ? 'border-slate-200 text-slate-800' : 'border-zinc-800 text-zinc-300'
+                                }`}>
+                                    <span className="text-xs font-bold uppercase tracking-wider">
+                                        Komite, Takvim & Kategori Ayarları
+                                    </span>
+                                </div>
+
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                    {/* Takvim Seçimi */}
+                                    <div>
+                                        <label className={`block text-xs font-bold uppercase tracking-wider mb-1.5 ${
+                                            isLight ? 'text-slate-600' : 'text-zinc-300'
+                                        }`}>
+                                            Topluluk Takvimi
+                                        </label>
+                                        <select
+                                            value={calendarId}
+                                            onChange={(e) => {
+                                                const newCalId = e.target.value;
+                                                setCalendarId(newCalId);
+                                                const assignedColor = COMMITTEE_COLORS[newCalId] || calendars.find(c => c.id === newCalId)?.color || '#ef4444';
+                                                setColor(assignedColor);
+                                            }}
+                                            className={`w-full rounded-xl px-3.5 py-2.5 text-xs font-semibold focus:outline-none focus:border-rose-500 ${
+                                                isLight
+                                                    ? 'bg-white border border-slate-300 text-slate-800'
+                                                    : 'bg-zinc-950 border border-zinc-700 text-zinc-100'
+                                            }`}
+                                        >
+                                            {calendars.map(cal => (
+                                                <option key={cal.id} value={cal.id}>{cal.title}</option>
+                                            ))}
+                                        </select>
+                                        <div className="flex items-center gap-2 mt-2">
+                                            <span 
+                                                className="w-3.5 h-3.5 rounded-full shrink-0 shadow-xs ring-2 ring-white/20" 
+                                                style={{ backgroundColor: COMMITTEE_COLORS[calendarId] || color }} 
+                                            />
+                                            <span className={`text-[11px] font-medium ${isLight ? 'text-slate-500' : 'text-zinc-400'}`}>
+                                                Komite Rengi: <strong>{calendars.find(c => c.id === calendarId)?.title || 'Genel'}</strong> için otomatik ayarlandı.
+                                            </span>
+                                        </div>
+                                    </div>
+
+                                    {/* Kategori Seçimi */}
+                                    <div>
+                                        <label className={`block text-xs font-bold uppercase tracking-wider mb-1.5 ${
+                                            isLight ? 'text-slate-600' : 'text-zinc-300'
+                                        }`}>
+                                            Etkinlik Kategorisi
+                                        </label>
+                                        <select
+                                            value={category}
+                                            onChange={(e) => setCategory(e.target.value)}
+                                            className={`w-full rounded-xl px-3.5 py-2.5 text-xs font-semibold focus:outline-none focus:border-rose-500 ${
+                                                isLight
+                                                    ? 'bg-white border border-slate-300 text-slate-800'
+                                                    : 'bg-zinc-950 border border-zinc-700 text-zinc-100'
+                                            }`}
+                                        >
+                                            <option value="Toplantı">Toplantı & Koordinasyon</option>
+                                            <option value="Geliştirme">Yazılım, Sprint & PR</option>
+                                            <option value="Workshop">Hands-on Atölye & Eğitim</option>
+                                            <option value="Yayın">Medium & Teknik Blog</option>
+                                            <option value="Sosyal Medya">Sosyal Medya & Tasarım</option>
+                                            <option value="Sponsorluk">Sponsorluk & Üniversite</option>
+                                            <option value="Hackathon">Hackathon & Yarışma</option>
+                                            <option value="Genel">Genel Kampüs Etkinliği</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* ── BÖLÜM 6: MARKDOWN AÇIKLAMA & GÜNDEM ── */}
+                            <div className={`p-4 rounded-2xl ${
+                                isLight 
+                                    ? 'bg-slate-50/80 border border-slate-200' 
+                                    : 'bg-zinc-900/70 border border-zinc-800'
+                            } space-y-2.5`}>
+                                <div className={`flex items-center justify-between border-b pb-2 ${
+                                    isLight ? 'border-slate-200' : 'border-zinc-800'
+                                }`}>
+                                    <label className={`text-xs font-bold uppercase tracking-wider ${
+                                        isLight ? 'text-slate-700' : 'text-zinc-200'
+                                    }`}>
+                                        Açıklama & Gündem (Markdown Destekli)
+                                    </label>
+                                    <div className={`flex gap-1 p-0.5 rounded-lg text-xs ${
+                                        isLight ? 'bg-slate-200/80' : 'bg-zinc-800'
+                                    }`}>
+                                        <button
+                                            type="button"
+                                            onClick={() => setDescTab('write')}
+                                            className={`px-3 py-1 rounded-md text-xs font-bold transition-colors ${
+                                                descTab === 'write' 
+                                                    ? isLight ? 'bg-white text-slate-900 shadow-xs' : 'bg-zinc-700 text-white shadow-xs'
+                                                    : isLight ? 'text-slate-500 hover:text-slate-900' : 'text-zinc-400 hover:text-zinc-200'
+                                            }`}
+                                        >
+                                            Düzenle
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setDescTab('preview')}
+                                            className={`px-3 py-1 rounded-md text-xs font-bold transition-colors ${
+                                                descTab === 'preview' 
+                                                    ? isLight ? 'bg-white text-slate-900 shadow-xs' : 'bg-zinc-700 text-white shadow-xs'
+                                                    : isLight ? 'text-slate-500 hover:text-slate-900' : 'text-zinc-400 hover:text-zinc-200'
+                                            }`}
+                                        >
+                                            Önizleme
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {descTab === 'write' ? (
+                                    <textarea
+                                        value={description}
+                                        onChange={(e) => setDescription(e.target.value)}
+                                        rows={6}
+                                        placeholder="Etkinlik gündemi, hedefler, toplantı notları veya rehberler... (# Başlık, - Madde)"
+                                        className={`w-full border rounded-xl p-3.5 text-xs sm:text-sm focus:outline-none focus:border-rose-500 font-mono leading-relaxed ${
+                                            isLight
+                                                ? 'bg-white border-slate-300 text-slate-800 placeholder-slate-400'
+                                                : 'bg-zinc-950 border-zinc-700 text-zinc-100 placeholder-zinc-500'
+                                        }`}
+                                    />
+                                ) : (
+                                    <div className={`p-4 rounded-xl min-h-[120px] text-xs sm:text-sm border leading-relaxed font-sans whitespace-pre-wrap ${
+                                        isLight
+                                            ? 'bg-white text-slate-800 border-slate-200'
+                                            : 'bg-zinc-950 text-zinc-200 border-zinc-800'
+                                    }`}>
+                                        {description || <p className={`italic ${isLight ? 'text-slate-400' : 'text-zinc-500'}`}>Henüz bir açıklama veya gündem yazılmadı.</p>}
+                                    </div>
+                                )}
+                            </div>
+                        </>
+                    )}
+
+                    {/* ── SEKMELER: 3. ERİŞİM & GÖRÜNÜRLÜK (RBAC) BÖLÜMÜ ── */}
+                    {(activeDrawerTab === 'access' || activeDrawerTab === 'all') && (
+                        <>
+                            {activeDrawerTab === 'all' && (
+                                <div className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold border ${
+                                    isLight ? 'bg-slate-100 text-slate-800 border-slate-200' : 'bg-zinc-800/80 text-zinc-200 border-zinc-700'
+                                }`}>
+                                    <span>🛡️ 2. Erişim & Görünürlük (RBAC)</span>
+                                </div>
+                            )}
+                            {/* ── BÖLÜM 2.5: ERİŞİM & GÖRÜNÜRLÜK DÜZEYİ (RBAC KORUMALI) ── */}
+                            <div className={`p-4 rounded-2xl ${
+                                isLight 
+                                    ? 'bg-slate-50/80 border border-slate-200' 
+                                    : 'bg-zinc-900/70 border border-zinc-800'
+                            } space-y-3`}>
+                                <div className={`flex items-center justify-between border-b pb-2 ${
+                                    isLight ? 'border-slate-200' : 'border-zinc-800'
+                                }`}>
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-sm">🛡️</span>
+                                        <span className={`text-xs font-bold uppercase tracking-wider ${
+                                            isLight ? 'text-slate-700' : 'text-zinc-200'
+                                        }`}>
+                                            Erişim & Görünürlük Düzeyi
+                                        </span>
+                                    </div>
+                                    <span className={`text-[10px] font-mono font-semibold px-2 py-0.5 rounded ${
+                                        isLight ? 'text-slate-600 bg-slate-200/80 border border-slate-300/70' : 'text-zinc-400 bg-zinc-800'
+                                    }`}>
+                                        {visibility === 'public' ? '🌍 Herkese Açık' : visibility === 'admin_only' ? '🛡️ Yönetici Özel' : visibility === 'committee' ? `🏛️ Belirli Komiteler (${customVisibleCommittees.length})` : visibility === 'custom' ? `👥 Belirli Kullanıcılar (${customVisibleMembers.length})` : '🔒 Gizli'}
+                                    </span>
+                                </div>
+
+                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5">
+                                    {/* 1. Tüm Topluluk */}
+                                    <button
+                                        type="button"
+                                        disabled={isReadOnly}
+                                        onClick={() => setVisibility('public')}
+                                        className={`p-3 rounded-xl border text-left transition-all relative flex flex-col justify-between ${
+                                            visibility === 'public'
+                                                ? isLight
+                                                    ? 'bg-emerald-50/90 border-emerald-500 shadow-sm ring-1 ring-emerald-500/30'
+                                                    : 'bg-zinc-800/90 border-emerald-500 shadow-md ring-1 ring-emerald-500/30'
+                                                : isLight
+                                                    ? 'bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50/80'
+                                                    : 'bg-zinc-950/60 border-zinc-800 hover:border-zinc-700 hover:bg-zinc-900/50'
+                                        } ${isReadOnly ? 'cursor-not-allowed opacity-75' : 'cursor-pointer'}`}
+                                    >
+                                        <div>
+                                            <div className="flex items-center justify-between mb-1">
+                                                <span className="text-base">🌍</span>
+                                                {visibility === 'public' && (
+                                                    <span className={`text-[10px] font-bold ${isLight ? 'text-emerald-700' : 'text-emerald-400'}`}>✓ Seçili</span>
+                                                )}
+                                            </div>
+                                            <p className={`text-xs font-bold ${isLight ? 'text-slate-900' : 'text-white'}`}>Tüm Topluluk</p>
+                                            <p className={`text-[10px] mt-0.5 leading-snug ${isLight ? 'text-slate-500' : 'text-zinc-400'}`}>
+                                                Tüm topluluk üyeleri takvimde görüntüleyebilir.
+                                            </p>
+                                        </div>
+                                    </button>
+
+                                    {/* 2. Sadece Adminler */}
+                                    <button
+                                        type="button"
+                                        disabled={isReadOnly}
+                                        onClick={() => setVisibility('admin_only')}
+                                        className={`p-3 rounded-xl border text-left transition-all relative flex flex-col justify-between ${
+                                            visibility === 'admin_only'
+                                                ? isLight
+                                                    ? 'bg-amber-50/90 border-amber-500 shadow-sm ring-1 ring-amber-500/30'
+                                                    : 'bg-zinc-800/90 border-amber-500 shadow-md ring-1 ring-amber-500/30'
+                                                : isLight
+                                                    ? 'bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50/80'
+                                                    : 'bg-zinc-950/60 border-zinc-800 hover:border-zinc-700 hover:bg-zinc-900/50'
+                                        } ${isReadOnly ? 'cursor-not-allowed opacity-75' : 'cursor-pointer'}`}
+                                    >
+                                        <div>
+                                            <div className="flex items-center justify-between mb-1">
+                                                <span className="text-base">🛡️</span>
+                                                {visibility === 'admin_only' && (
+                                                    <span className={`text-[10px] font-bold ${isLight ? 'text-amber-700' : 'text-amber-400'}`}>✓ Seçili</span>
+                                                )}
+                                            </div>
+                                            <p className={`text-xs font-bold ${isLight ? 'text-slate-900' : 'text-white'}`}>Sadece Adminler</p>
+                                            <p className={`text-[10px] mt-0.5 leading-snug ${isLight ? 'text-slate-500' : 'text-zinc-400'}`}>
+                                                Yalnızca Super Admin, Workspace Admin ve Editorler görür.
+                                            </p>
+                                        </div>
+                                    </button>
+
+                                    {/* 3. Belirli Komiteler */}
+                                    <button
+                                        type="button"
+                                        disabled={isReadOnly}
+                                        onClick={() => {
+                                            setVisibility('committee');
+                                            if (customVisibleCommittees.length === 0 && calendarId) {
+                                                setCustomVisibleCommittees([calendarId]);
+                                            }
+                                        }}
+                                        className={`p-3 rounded-xl border text-left transition-all relative flex flex-col justify-between ${
+                                            visibility === 'committee'
+                                                ? isLight
+                                                    ? 'bg-purple-50/90 border-purple-500 shadow-sm ring-1 ring-purple-500/30'
+                                                    : 'bg-zinc-800/90 border-purple-500 shadow-md ring-1 ring-purple-500/30'
+                                                : isLight
+                                                    ? 'bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50/80'
+                                                    : 'bg-zinc-950/60 border-zinc-800 hover:border-zinc-700 hover:bg-zinc-900/50'
+                                        } ${isReadOnly ? 'cursor-not-allowed opacity-75' : 'cursor-pointer'}`}
+                                    >
+                                        <div>
+                                            <div className="flex items-center justify-between mb-1">
+                                                <span className="text-base">🏛️</span>
+                                                {visibility === 'committee' && (
+                                                    <span className={`text-[10px] font-bold ${isLight ? 'text-purple-700' : 'text-purple-400'}`}>✓ Seçili</span>
+                                                )}
+                                            </div>
+                                            <p className={`text-xs font-bold ${isLight ? 'text-slate-900' : 'text-white'}`}>Belirli Komiteler</p>
+                                            <p className={`text-[10px] mt-0.5 leading-snug ${isLight ? 'text-slate-500' : 'text-zinc-400'}`}>
+                                                Yalnızca seçtiğiniz komitelerin üyeleri ve yöneticiler görebilir.
+                                            </p>
+                                        </div>
+                                        {visibility === 'committee' && customVisibleCommittees.length > 0 && (
+                                            <span className={`text-[10px] font-bold mt-2 inline-block px-1.5 py-0.5 rounded w-fit ${
+                                                isLight ? 'bg-purple-100 text-purple-800' : 'bg-purple-900/50 text-purple-300'
+                                            }`}>
+                                                {customVisibleCommittees.length} Komite Seçildi
+                                            </span>
+                                        )}
+                                    </button>
+
+                                    {/* 4. Belirli Kullanıcılar */}
+                                    <button
+                                        type="button"
+                                        disabled={isReadOnly}
+                                        onClick={() => setVisibility('custom')}
+                                        className={`p-3 rounded-xl border text-left transition-all relative flex flex-col justify-between ${
+                                            visibility === 'custom'
+                                                ? isLight
+                                                    ? 'bg-blue-50/90 border-blue-500 shadow-sm ring-1 ring-blue-500/30'
+                                                    : 'bg-zinc-800/90 border-blue-500 shadow-md ring-1 ring-blue-500/30'
+                                                : isLight
+                                                    ? 'bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50/80'
+                                                    : 'bg-zinc-950/60 border-zinc-800 hover:border-zinc-700 hover:bg-zinc-900/50'
+                                        } ${isReadOnly ? 'cursor-not-allowed opacity-75' : 'cursor-pointer'}`}
+                                    >
+                                        <div>
+                                            <div className="flex items-center justify-between mb-1">
+                                                <span className="text-base">👥</span>
+                                                {visibility === 'custom' && (
+                                                    <span className={`text-[10px] font-bold ${isLight ? 'text-blue-700' : 'text-blue-400'}`}>✓ Seçili</span>
+                                                )}
+                                            </div>
+                                            <p className={`text-xs font-bold ${isLight ? 'text-slate-900' : 'text-white'}`}>Belirli Kullanıcılar</p>
+                                            <p className={`text-[10px] mt-0.5 leading-snug ${isLight ? 'text-slate-500' : 'text-zinc-400'}`}>
+                                                Yalnızca arayıp seçtiğiniz özel kullanıcı listesi görür.
+                                            </p>
+                                        </div>
+                                    </button>
+
+                                    {/* 5. Sadece Ben */}
+                                    <button
+                                        type="button"
+                                        disabled={isReadOnly}
+                                        onClick={() => setVisibility('private')}
+                                        className={`p-3 rounded-xl border text-left transition-all relative flex flex-col justify-between ${
+                                            visibility === 'private'
+                                                ? isLight
+                                                    ? 'bg-rose-50/90 border-rose-500 shadow-sm ring-1 ring-rose-500/30'
+                                                    : 'bg-zinc-800/90 border-rose-500 shadow-md ring-1 ring-rose-500/30'
+                                                : isLight
+                                                    ? 'bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50/80'
+                                                    : 'bg-zinc-950/60 border-zinc-800 hover:border-zinc-700 hover:bg-zinc-900/50'
+                                        } ${isReadOnly ? 'cursor-not-allowed opacity-75' : 'cursor-pointer'}`}
+                                    >
+                                        <div>
+                                            <div className="flex items-center justify-between mb-1">
+                                                <span className="text-base">🔒</span>
+                                                {visibility === 'private' && (
+                                                    <span className={`text-[10px] font-bold ${isLight ? 'text-rose-700' : 'text-rose-400'}`}>✓ Seçili</span>
+                                                )}
+                                            </div>
+                                            <p className={`text-xs font-bold ${isLight ? 'text-slate-900' : 'text-white'}`}>Sadece Ben</p>
+                                            <p className={`text-[10px] mt-0.5 leading-snug ${isLight ? 'text-slate-500' : 'text-zinc-400'}`}>
+                                                Yalnızca oluşturan siz ve Super Admin görebilir.
+                                            </p>
+                                        </div>
+                                    </button>
+                                </div>
+
+                                {/* 🏛️ Belirli Komiteler Seçim Paneli */}
+                                {visibility === 'committee' && (
+                                    <div className={`p-4 rounded-xl border space-y-3.5 ${
+                                        isLight ? 'bg-white border-purple-200/80 shadow-xs' : 'bg-zinc-950/80 border-purple-900/40 shadow-sm'
+                                    }`}>
+                                        <div className="flex flex-wrap items-center justify-between gap-2">
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-base">🏛️</span>
+                                                <div>
+                                                    <h5 className={`text-xs font-bold ${isLight ? 'text-slate-800' : 'text-zinc-200'}`}>
+                                                        Erişim İzni Verilecek Komiteler ({customVisibleCommittees.length} / {availableCommittees.length})
+                                                    </h5>
+                                                    <p className={`text-[10px] ${isLight ? 'text-slate-500' : 'text-zinc-400'}`}>
+                                                        Etkinliği yalnızca seçili komitelerin üyeleri ve liderleri görüntüleyebilir.
+                                                    </p>
+                                                </div>
+                                            </div>
+                                            {!isReadOnly && (
+                                                <div className="flex items-center gap-2">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setCustomVisibleCommittees(availableCommittees.map(c => c.id))}
+                                                        className={`text-[11px] font-semibold px-2.5 py-1 rounded-lg transition-colors cursor-pointer ${
+                                                            isLight ? 'bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200' : 'bg-purple-950/40 hover:bg-purple-900/50 text-purple-300 border border-purple-800/60'
+                                                        }`}
+                                                    >
+                                                        Tümünü Seç
+                                                    </button>
+                                                    {customVisibleCommittees.length > 0 && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setCustomVisibleCommittees([])}
+                                                            className="text-[11px] text-rose-500 hover:text-rose-600 font-semibold px-2 py-1 cursor-pointer"
+                                                        >
+                                                            Temizle
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        {/* Seçili Komite Rozetleri (Chips) */}
+                                        {customVisibleCommittees.length > 0 ? (
+                                            <div className="flex flex-wrap gap-1.5 pt-0.5">
+                                                {customVisibleCommittees.map(cId => {
+                                                    const cObj = availableCommittees.find(c => c.id === cId);
+                                                    const cTitle = cObj?.title || cId;
+                                                    const cColor = cObj?.color || COMMITTEE_COLORS[cId] || '#8b5cf6';
+                                                    return (
+                                                        <span
+                                                            key={cId}
+                                                            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold border ${
+                                                                isLight
+                                                                    ? 'bg-purple-50 border-purple-200 text-purple-900'
+                                                                    : 'bg-purple-950/50 border-purple-800/60 text-purple-200'
+                                                            }`}
+                                                        >
+                                                            <span
+                                                                className="w-2.5 h-2.5 rounded-full shrink-0 shadow-xs"
+                                                                style={{ backgroundColor: cColor }}
+                                                            />
+                                                            <span>{cTitle}</span>
+                                                            {!isReadOnly && (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => setCustomVisibleCommittees(prev => prev.filter(id => id !== cId))}
+                                                                    className="text-purple-500 hover:text-purple-700 hover:bg-purple-200/50 dark:hover:bg-purple-900 rounded p-0.5 transition-colors cursor-pointer"
+                                                                    title="Kaldır"
+                                                                >
+                                                                    ✕
+                                                                </button>
+                                                            )}
+                                                        </span>
+                                                    );
+                                                })}
+                                            </div>
+                                        ) : (
+                                            <div className={`p-2.5 rounded-lg border text-xs flex items-center gap-2 ${
+                                                isLight ? 'bg-amber-50/70 border-amber-200 text-amber-800' : 'bg-amber-950/30 border-amber-800/50 text-amber-300'
+                                            }`}>
+                                                <span>⚠️</span>
+                                                <span>Lütfen aşağıdan en az bir komite seçin. Hiçbir komite seçilmezse yalnızca yöneticiler görebilir.</span>
+                                            </div>
+                                        )}
+
+                                        {/* Komite Seçim Kartları */}
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                                            {availableCommittees.map(cal => {
+                                                const isSelected = customVisibleCommittees.includes(cal.id);
+                                                const calColor = COMMITTEE_COLORS[cal.id] || cal.color || '#8b5cf6';
+                                                return (
+                                                    <div
+                                                        key={cal.id}
+                                                        onClick={() => {
+                                                            if (isReadOnly) return;
+                                                            setCustomVisibleCommittees(prev =>
+                                                                isSelected ? prev.filter(id => id !== cal.id) : [...prev, cal.id]
+                                                            );
+                                                        }}
+                                                        className={`p-3 rounded-xl border transition-all flex items-center justify-between ${
+                                                            isSelected
+                                                                ? isLight
+                                                                    ? 'bg-purple-50/90 border-purple-400 shadow-xs ring-1 ring-purple-400/30'
+                                                                    : 'bg-purple-950/40 border-purple-500 shadow-xs ring-1 ring-purple-500/30'
+                                                                : isLight
+                                                                    ? 'bg-slate-50/70 border-slate-200 hover:bg-white hover:border-slate-300'
+                                                                    : 'bg-zinc-900/60 border-zinc-800 hover:bg-zinc-900 hover:border-zinc-700'
+                                                        } ${isReadOnly ? 'cursor-default' : 'cursor-pointer'}`}
+                                                    >
+                                                        <div className="flex items-center gap-2.5 min-w-0">
+                                                            <span
+                                                                className="w-3.5 h-3.5 rounded-full shrink-0 shadow-xs"
+                                                                style={{ backgroundColor: calColor }}
+                                                            />
+                                                            <div className="truncate">
+                                                                <p className={`text-xs font-bold truncate ${isLight ? 'text-slate-800' : 'text-zinc-100'}`}>
+                                                                    {cal.title}
+                                                                </p>
+                                                                {cal.description && (
+                                                                    <p className={`text-[10px] truncate ${isLight ? 'text-slate-500' : 'text-zinc-400'}`}>
+                                                                        {cal.description}
+                                                                    </p>
+                                                                )}
+                                                            </div>
+                                                        </div>
+
+                                                        <div className="shrink-0 ml-2">
+                                                            <div className={`w-5 h-5 rounded-md flex items-center justify-center text-xs font-bold transition-all ${
+                                                                isSelected
+                                                                    ? 'bg-purple-600 text-white shadow-xs'
+                                                                    : isLight
+                                                                        ? 'border border-slate-300 bg-white text-transparent'
+                                                                        : 'border border-zinc-700 bg-zinc-800 text-transparent'
+                                                            }`}>
+                                                                ✓
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* 👥 Belirli Kullanıcılar Arama & Çoklu Seçim Paneli */}
+                                {visibility === 'custom' && (
+                                    <div className={`p-4 rounded-xl border space-y-3 ${
+                                        isLight ? 'bg-white border-slate-200 shadow-xs' : 'bg-zinc-950/80 border-zinc-800 shadow-sm'
+                                    }`}>
+                                        <div className="flex items-center justify-between">
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-sm">🔍</span>
+                                                <span className={`text-xs font-bold ${isLight ? 'text-slate-700' : 'text-zinc-200'}`}>
+                                                    Erişim İzni Olan Kullanıcılar ({customVisibleMembers.length})
+                                                </span>
+                                            </div>
+                                            {customVisibleMembers.length > 0 && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setCustomVisibleMembers([])}
+                                                    className="text-[10px] text-rose-500 hover:underline font-semibold cursor-pointer"
+                                                >
+                                                    Tümünü Temizle
+                                                </button>
+                                            )}
+                                        </div>
+
+                                        {/* Arama Inputu */}
+                                        <div className="relative">
+                                            <input
+                                                type="text"
+                                                placeholder="Kullanıcı adı (@username) veya isim ile ara..."
+                                                value={memberSearchQuery}
+                                                onChange={(e) => setMemberSearchQuery(e.target.value)}
+                                                className={`w-full rounded-xl pl-9 pr-8 py-2 text-xs font-semibold focus:outline-none focus:border-rose-500 border ${
+                                                    isLight ? 'bg-slate-50 border-slate-200 text-slate-800' : 'bg-zinc-900 border-zinc-700 text-zinc-100'
+                                                }`}
+                                            />
+                                            <span className="absolute left-3 top-2.5 text-xs text-zinc-400">🔍</span>
+                                            {memberSearchQuery && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setMemberSearchQuery('')}
+                                                    className="absolute right-3 top-2.5 text-xs text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 cursor-pointer"
+                                                >
+                                                    ✕
+                                                </button>
+                                            )}
+                                        </div>
+
+                                        {/* Seçili Kullanıcı Rozetleri (Chips) */}
+                                        {customVisibleMembers.length > 0 ? (
+                                            <div className="flex flex-wrap gap-1.5 pt-1">
+                                                {customVisibleMembers.map(mId => {
+                                                    const m = members.find(u => u.id === mId || u.username === mId);
+                                                    const displayName = m?.display_name || m?.full_name || m?.username || mId;
+                                                    return (
+                                                        <span
+                                                            key={mId}
+                                                            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold border ${
+                                                                isLight
+                                                                    ? 'bg-rose-50 border-rose-200 text-rose-800'
+                                                                    : 'bg-rose-950/40 border-rose-800/60 text-rose-300'
+                                                            }`}
+                                                        >
+                                                            <span className="w-4 h-4 rounded-full bg-rose-500 text-white flex items-center justify-center text-[9px] font-bold">
+                                                                {displayName.charAt(0).toUpperCase()}
+                                                            </span>
+                                                            <span>{displayName}</span>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => setCustomVisibleMembers(prev => prev.filter(id => id !== mId))}
+                                                                className="text-rose-500 hover:text-rose-700 hover:bg-rose-200/50 rounded p-0.5 transition-colors cursor-pointer"
+                                                                title="Kaldır"
+                                                            >
+                                                                ✕
+                                                            </button>
+                                                        </span>
+                                                    );
+                                                })}
+                                            </div>
+                                        ) : (
+                                            <p className={`text-[11px] italic py-1 ${isLight ? 'text-slate-500' : 'text-zinc-500'}`}>
+                                                Henüz kullanıcı seçilmedi. Aşağıdaki arama listesinden dilediğiniz kullanıcıları ekleyin.
+                                            </p>
+                                        )}
+
+                                        {/* Arama Sonuçları / Önerilen Kullanıcılar */}
+                                        <div className="max-h-44 overflow-y-auto space-y-1 pr-1 custom-scrollbar">
+                                            {members
+                                                .filter(m => {
+                                                    if (!memberSearchQuery.trim()) return true;
+                                                    const q = memberSearchQuery.toLowerCase();
+                                                    const nameStr = (m.display_name || m.full_name || '').toLowerCase();
+                                                    const userStr = (m.username || '').toLowerCase();
+                                                    const roleStr = (m.role || '').toLowerCase();
+                                                    return nameStr.includes(q) || userStr.includes(q) || roleStr.includes(q);
+                                                })
+                                                .map(m => {
+                                                    const isSelected = customVisibleMembers.includes(m.id) || customVisibleMembers.includes(m.username);
+                                                    const displayName = m.display_name || m.full_name || m.username;
+                                                    return (
+                                                        <div
+                                                            key={m.id}
+                                                            onClick={() => {
+                                                                if (isSelected) {
+                                                                    setCustomVisibleMembers(prev => prev.filter(id => id !== m.id && id !== m.username));
+                                                                } else {
+                                                                    setCustomVisibleMembers(prev => [...prev, m.id]);
+                                                                }
+                                                            }}
+                                                            className={`flex items-center justify-between p-2 rounded-xl text-xs cursor-pointer transition-all border ${
+                                                                isSelected
+                                                                    ? isLight
+                                                                        ? 'bg-rose-50/80 border-rose-300 text-rose-900 font-bold'
+                                                                        : 'bg-rose-950/40 border-rose-700 text-rose-200 font-bold'
+                                                                    : isLight
+                                                                        ? 'hover:bg-slate-100 border-transparent text-slate-700'
+                                                                        : 'hover:bg-zinc-900 border-transparent text-zinc-300'
+                                                            }`}
+                                                        >
+                                                            <div className="flex items-center gap-2">
+                                                                <span className="w-6 h-6 rounded-full bg-slate-200 dark:bg-zinc-800 flex items-center justify-center text-[10px] font-bold">
+                                                                    {displayName.charAt(0).toUpperCase()}
+                                                                </span>
+                                                                <div>
+                                                                    <p className="font-semibold text-xs leading-none">{displayName}</p>
+                                                                    <p className="text-[10px] text-zinc-400 mt-0.5">@{m.username} {m.role ? `• ${m.role}` : ''}</p>
+                                                                </div>
+                                                            </div>
+                                                            <span className={`text-xs ${isSelected ? 'text-rose-500 font-bold' : 'text-zinc-400'}`}>
+                                                                {isSelected ? '✓ Seçili' : '+ Seç'}
+                                                            </span>
+                                                        </div>
+                                                    );
+                                                })}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* 🚀 VİTRİN KÖPRÜSÜ: ANA SAYFADA / VİTRİNDE YAYINLA (SHOWCASE TOGGLE) */}
+                                <div className={`p-3.5 rounded-xl border transition-all ${
+                                    isShowcase
+                                        ? isLight
+                                            ? 'bg-gradient-to-r from-rose-50 to-amber-50 border-rose-300 shadow-sm ring-1 ring-rose-400/30'
+                                            : 'bg-gradient-to-r from-rose-950/40 to-amber-950/20 border-rose-700/80 shadow-md ring-1 ring-rose-500/30'
+                                        : isLight
+                                            ? 'bg-white border-slate-200 hover:border-slate-300'
+                                            : 'bg-zinc-950/60 border-zinc-800 hover:border-zinc-700'
+                                }`}>
+                                    <div className="flex items-center justify-between gap-3">
+                                        <div className="flex items-start gap-2.5">
+                                            <span className="text-xl shrink-0 mt-0.5">🌟</span>
+                                            <div>
+                                                <div className="flex items-center gap-2">
+                                                    <span className={`text-xs font-bold ${isLight ? 'text-slate-900' : 'text-zinc-100'}`}>
+                                                        Ana Sayfada / Vitrinde Yayınla (Public Showcase)
+                                                    </span>
+                                                    {isShowcase && (
+                                                        <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-rose-600 text-white shadow-xs">
+                                                            CANLI VİTRİN AKTİF
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                <p className={`text-[11px] mt-1 leading-relaxed ${isLight ? 'text-slate-600' : 'text-zinc-400'}`}>
+                                                    Bu seçenek açık olduğunda etkinlik yalnızca dahili takvimde kalmaz; ana sayfadaki (<strong className="font-semibold text-rose-600 dark:text-rose-400">/</strong>) Bento Grid vitrininde tüm öğrencilere sergilenir.
+                                                </p>
+                                            </div>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => setIsShowcase(!isShowcase)}
+                                            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                                                isShowcase ? 'bg-rose-600' : isLight ? 'bg-slate-300' : 'bg-zinc-700'
+                                            }`}
+                                            role="switch"
+                                            aria-checked={isShowcase}
+                                        >
+                                            <span
+                                                className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                                                    isShowcase ? 'translate-x-5' : 'translate-x-0'
+                                                }`}
+                                            />
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </>
+                    )}
+
+                    {/* ── SEKMELER: 2. ZAMANLAMA, TARİH & KONUM BÖLÜMÜ ── */}
+                    {(activeDrawerTab === 'general' || activeDrawerTab === 'datetime' || activeDrawerTab === 'all') && (
+                        <>
+                            {activeDrawerTab === 'all' && (
+                                <div className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold border ${
+                                    isLight ? 'bg-slate-100 text-slate-800 border-slate-200' : 'bg-zinc-800/80 text-zinc-200 border-zinc-700'
+                                }`}>
+                                    <span>⏱️ 3. Zamanlama & Konum</span>
+                                </div>
+                            )}
+                            {/* ── BÖLÜM 3: ZAMANLAMA, TARİH & HIZLI SÜRE KISAYOLLARI ── */}
+                            <div className={`p-4 rounded-2xl ${
+                                isLight 
+                                    ? 'bg-slate-50/80 border border-slate-200' 
+                                    : 'bg-zinc-900/70 border border-zinc-800'
+                            } space-y-4`}>
+                                <div className={`flex items-center justify-between border-b pb-2 ${
+                                    isLight ? 'border-slate-200' : 'border-zinc-800'
+                                }`}>
+                                    <span className={`text-xs font-bold uppercase tracking-wider ${
+                                        isLight ? 'text-slate-700' : 'text-zinc-300'
+                                    }`}>
+                                        Zamanlama & Süre Hesaplama
+                                    </span>
+                                    <label className="inline-flex items-center cursor-pointer gap-2">
+                                        <input
+                                            type="checkbox"
+                                            checked={isAllDay}
+                                            onChange={(e) => setIsAllDay(e.target.checked)}
+                                            className="sr-only peer"
+                                        />
+                                        <div className={`w-9 h-5 ${isLight ? 'bg-slate-300' : 'bg-zinc-700'} peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-rose-600 relative`}></div>
+                                        <span className={`text-xs font-bold ${isLight ? 'text-slate-700' : 'text-zinc-200'}`}>Tüm Gün</span>
+                                    </label>
+                                </div>
+
+                                {/* Tarih Kısayolları */}
+                                <div>
+                                    <span className={`text-[11px] font-semibold block mb-1.5 ${
+                                        isLight ? 'text-slate-500' : 'text-zinc-400'
+                                    }`}>
+                                        Hızlı Tarih Seçimi:
+                                    </span>
+                                    <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                                        {[
+                                            { id: 'today', label: 'Bugün' },
+                                            { id: 'tomorrow', label: 'Yarın' },
+                                            { id: 'friday', label: 'Bu Cuma' },
+                                            { id: 'saturday', label: 'Bu Cumartesi' },
+                                            { id: 'sunday', label: 'Bu Pazar' },
+                                            { id: 'next_week', label: 'Gelecek Hafta' },
+                                        ].map(dp => (
+                                            <button
+                                                key={dp.id}
+                                                type="button"
+                                                onClick={() => handleQuickDate(dp.id as any)}
+                                                className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition-colors ${
+                                                    isLight
+                                                        ? 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200 shadow-xs'
+                                                        : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700/80'
+                                                }`}
+                                            >
+                                                {dp.label}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                {/* Süre Kısayolları (Otomatik Bitiş Saati Hesaplar) */}
+                                {!isAllDay && (
+                                    <div>
+                                        <span className={`text-[11px] font-semibold block mb-1.5 ${
+                                            isLight ? 'text-slate-500' : 'text-zinc-400'
+                                        }`}>
+                                            Toplantı Süresi (Bitişi Otomatik Hesaplar):
+                                        </span>
+                                        <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                                            {[
+                                                { mins: 30, label: '30 Dk' },
+                                                { mins: 45, label: '45 Dk' },
+                                                { mins: 60, label: '1 Saat' },
+                                                { mins: 90, label: '1.5 Saat' },
+                                                { mins: 120, label: '2 Saat' },
+                                                { mins: 180, label: '3 Saat' },
+                                                { mins: 240, label: '4 Saat' },
+                                            ].map(dur => (
+                                                <button
+                                                    key={dur.mins}
+                                                    type="button"
+                                                    onClick={() => handleSetDuration(dur.mins)}
+                                                    className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold border transition-colors ${
+                                                        isLight
+                                                            ? 'bg-white hover:bg-rose-50 hover:text-rose-600 text-slate-700 border-slate-200 shadow-xs'
+                                                            : 'bg-zinc-800 hover:bg-rose-900/60 hover:text-white text-zinc-300 border-zinc-700/80'
+                                                    }`}
+                                                >
+                                                    {dur.label}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Tarih & Saat Inputları */}
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                                    <div>
+                                        <label className={`block text-xs font-bold mb-1 ${
+                                            isLight ? 'text-slate-600' : 'text-zinc-300'
+                                        }`}>Başlangıç Zamanı</label>
+                                        <div className="flex gap-2">
+                                            <input
+                                                type="date"
+                                                value={startDate}
+                                                onChange={(e) => handleStartDateChange(e.target.value)}
+                                                className={`w-full border rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:border-rose-500 ${
+                                                    isLight
+                                                        ? 'bg-white border-slate-300 text-slate-800'
+                                                        : 'bg-zinc-950 border-zinc-700 text-zinc-100'
+                                                }`}
+                                                required
+                                            />
+                                            {!isAllDay && (
+                                                <input
+                                                    type="time"
+                                                    value={startTime}
+                                                    onChange={(e) => handleStartTimeChange(e.target.value)}
+                                                    className={`w-28 border rounded-xl px-2.5 py-2 text-xs font-mono font-bold focus:outline-none focus:border-rose-500 ${
+                                                        isLight
+                                                            ? 'bg-white border-slate-300 text-slate-800'
+                                                            : 'bg-zinc-950 border-zinc-700 text-zinc-100'
+                                                    }`}
+                                                    required
+                                                />
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    <div>
+                                        <label className={`block text-xs font-bold mb-1 ${
+                                            isLight ? 'text-slate-600' : 'text-zinc-300'
+                                        }`}>Bitiş Zamanı</label>
+                                        <div className="flex gap-2">
+                                            <input
+                                                type="date"
+                                                value={endDate}
+                                                onChange={(e) => setEndDate(e.target.value)}
+                                                className={`w-full border rounded-xl px-3 py-2 text-xs font-semibold focus:outline-none focus:border-rose-500 ${
+                                                    isLight
+                                                        ? 'bg-white border-slate-300 text-slate-800'
+                                                        : 'bg-zinc-950 border-zinc-700 text-zinc-100'
+                                                }`}
+                                                required
+                                            />
+                                            {!isAllDay && (
+                                                <input
+                                                    type="time"
+                                                    value={endTime}
+                                                    onChange={(e) => setEndTime(e.target.value)}
+                                                    className={`w-28 border rounded-xl px-2.5 py-2 text-xs font-mono font-bold focus:outline-none focus:border-rose-500 ${
+                                                        isLight
+                                                            ? 'bg-white border-slate-300 text-slate-800'
+                                                            : 'bg-zinc-950 border-zinc-700 text-zinc-100'
+                                                    }`}
+                                                    required
+                                                />
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Canlı Otomatik Süre Göstergesi */}
+                                {calculatedDurationStr && (
+                                    <div className={`flex items-center gap-2 px-3.5 py-2 rounded-xl border text-xs font-semibold ${
+                                        calculatedDurationStr.includes('Geçersiz')
+                                            ? 'bg-rose-500/10 border-rose-500/30 text-rose-500'
+                                            : isLight
+                                                ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                                                : 'bg-emerald-950/40 border-emerald-800/60 text-emerald-300'
+                                    }`}>
+                                        <span className="text-sm">⏱️</span>
+                                        <span>Etkinlik Süresi:</span>
+                                        <span className="font-mono font-bold">{calculatedDurationStr}</span>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* ── BÖLÜM 3.5: PROFESYONEL HATIRLATICI MEKANİZMASI ── */}
+                            <div className={`p-4 rounded-2xl ${
+                                isLight 
+                                    ? 'bg-slate-50/80 border border-slate-200' 
+                                    : 'bg-zinc-900/70 border border-zinc-800'
+                            } space-y-3.5`}>
+                                <div className={`flex items-center justify-between border-b pb-2 ${
+                                    isLight ? 'border-slate-200' : 'border-zinc-800'
+                                }`}>
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-sm">⏰</span>
+                                        <span className={`text-xs font-bold uppercase tracking-wider ${
+                                            isLight ? 'text-slate-700' : 'text-zinc-200'
+                                        }`}>
+                                            Profesyonel Hatırlatıcı Mekanizması ({reminders.length})
+                                        </span>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={handleTestInstantReminder}
+                                        disabled={isTestingReminder}
+                                        className={`text-[11px] font-bold flex items-center gap-1 transition-colors px-2.5 py-1 rounded-lg border disabled:opacity-50 ${
+                                            isLight
+                                                ? 'bg-white border-slate-200 text-rose-600 hover:bg-rose-50/60 shadow-xs'
+                                                : 'bg-zinc-800 border-zinc-700 text-rose-400 hover:text-rose-300 hover:border-zinc-600'
+                                        }`}
+                                        title="Sistem ve tarayıcı hatırlatıcısını hemen test et"
+                                    >
+                                        <span>🔔</span>
+                                        <span>{isTestingReminder ? 'Test Ediliyor...' : 'Hatırlatıcıyı Test Et'}</span>
+                                    </button>
+                                </div>
+
+                                {reminderTestSuccess && (
+                                    <div className={`p-2.5 rounded-xl border text-xs font-bold flex items-center gap-2 animate-in fade-in ${
+                                        isLight
+                                            ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
+                                            : 'bg-emerald-950/70 border-emerald-800 text-emerald-200'
+                                    }`}>
+                                        <span>✓</span>
+                                        <span>Test hatırlatıcısı başarıyla gönderildi! Bildirim merkezinden ve sisteminizden kontrol edebilirsiniz.</span>
+                                    </div>
+                                )}
+
+                                {/* Hızlı Hatırlatıcı Ekleme Butonları */}
+                                <div>
+                                    <span className={`text-[11px] font-semibold block mb-1.5 ${
+                                        isLight ? 'text-slate-500' : 'text-zinc-400'
+                                    }`}>
+                                        Hızlı Hatırlatıcı Ekle:
+                                    </span>
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                        <button
+                                            type="button"
+                                            onClick={() => handleAddReminder(15, 'all')}
+                                            className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition-colors ${
+                                                isLight
+                                                    ? 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200 shadow-xs'
+                                                    : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700/80'
+                                            }`}
+                                        >
+                                            + ⏱️ 15 Dk Önce
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => handleAddReminder(60, 'all')}
+                                            className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition-colors ${
+                                                isLight
+                                                    ? 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200 shadow-xs'
+                                                    : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700/80'
+                                            }`}
+                                        >
+                                            + ⏰ 1 Saat Önce
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => handleAddReminder(1440, 'all')}
+                                            className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition-colors ${
+                                                isLight
+                                                    ? 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200 shadow-xs'
+                                                    : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700/80'
+                                            }`}
+                                        >
+                                            + 📅 1 Gün Önce
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => handleAddReminder(2880, 'admins')}
+                                            className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition-colors ${
+                                                isLight
+                                                    ? 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200 shadow-xs'
+                                                    : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700/80'
+                                            }`}
+                                        >
+                                            + 🛡️ 2 Gün Önce (Yöneticiler)
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {/* ⚙️ Özel Hatırlatıcı Kurucu */}
+                                <div className={`p-2.5 rounded-xl border flex flex-wrap items-center gap-2 ${
+                                    isLight ? 'bg-white border-slate-200 shadow-xs' : 'bg-zinc-950 border-zinc-800 shadow-xs'
+                                }`}>
+                                    <span className={`text-[11px] font-bold ${isLight ? 'text-slate-600' : 'text-zinc-300'}`}>
+                                        Özel Hatırlatıcı:
+                                    </span>
+                                    <input
+                                        type="number"
+                                        min="1"
+                                        max="1000"
+                                        value={customReminderVal}
+                                        onChange={(e) => setCustomReminderVal(Math.max(1, parseInt(e.target.value) || 1))}
+                                        className={`w-16 px-2 py-1 rounded-lg text-xs border text-center font-bold focus:outline-none focus:border-rose-500 ${
+                                            isLight ? 'bg-slate-50 border-slate-200 text-slate-800' : 'bg-zinc-900 border-zinc-700 text-zinc-100'
+                                        }`}
+                                    />
+                                    <select
+                                        value={customReminderUnit}
+                                        onChange={(e) => setCustomReminderUnit(e.target.value as any)}
+                                        className={`px-2 py-1 rounded-lg text-xs border font-semibold focus:outline-none focus:border-rose-500 ${
+                                            isLight ? 'bg-slate-50 border-slate-200 text-slate-800' : 'bg-zinc-900 border-zinc-700 text-zinc-100'
+                                        }`}
+                                    >
+                                        <option value="minutes">Dakika Önce</option>
+                                        <option value="hours">Saat Önce</option>
+                                        <option value="days">Gün Önce</option>
+                                    </select>
+                                    <select
+                                        value={customReminderTarget}
+                                        onChange={(e) => setCustomReminderTarget(e.target.value as any)}
+                                        className={`px-2 py-1 rounded-lg text-xs border font-semibold focus:outline-none focus:border-rose-500 ${
+                                            isLight ? 'bg-slate-50 border-slate-200 text-slate-800' : 'bg-zinc-900 border-zinc-700 text-zinc-100'
+                                        }`}
+                                    >
+                                        <option value="all">Tüm Topluluk</option>
+                                        <option value="admins">Sadece Yöneticiler</option>
+                                        <option value="assignees">Görevliler</option>
+                                    </select>
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            const mult = customReminderUnit === 'days' ? 1440 : customReminderUnit === 'hours' ? 60 : 1;
+                                            handleAddReminder(customReminderVal * mult, customReminderTarget);
+                                        }}
+                                        className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs transition-colors cursor-pointer"
+                                    >
+                                        + Hatırlatıcı Ekle
+                                    </button>
+                                </div>
+
+                                {/* Aktif Hatırlatıcılar Listesi */}
+                                <div className="space-y-1.5">
+                                    {reminders.length === 0 ? (
+                                        <p className={`text-xs italic py-1 ${
+                                            isLight ? 'text-slate-500' : 'text-zinc-500'
+                                        }`}>Henüz planlanmış hatırlatıcı yok. Yukarıdaki butonlardan ekleyebilirsiniz.</p>
+                                    ) : (
+                                        reminders.map(rem => {
+                                            const mins = rem.minutes_before ?? rem.trigger_minutes_before ?? 60;
+                                            const label = mins < 60
+                                                ? `${mins} dakika önce`
+                                                : mins < 1440
+                                                    ? `${Math.round(mins / 60)} saat önce`
+                                                    : `${Math.round(mins / 1440)} gün önce`;
+                                            const targetLabel = rem.target === 'admins' ? 'Sadece Yöneticiler' : rem.target === 'assignees' ? 'Görevliler' : 'Tüm Topluluk';
+
+                                            return (
+                                                <div
+                                                    key={rem.id}
+                                                    className={`flex items-center justify-between p-2 rounded-xl border text-xs ${
+                                                        isLight
+                                                            ? 'bg-white border-slate-200'
+                                                            : 'bg-zinc-950 border-zinc-800'
+                                                    }`}
+                                                >
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-rose-500">🔔</span>
+                                                        <span className={`font-semibold ${isLight ? 'text-slate-800' : 'text-zinc-200'}`}>{label}</span>
+                                                        <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
+                                                            isLight
+                                                                ? 'bg-slate-100 text-slate-600 border border-slate-200'
+                                                                : 'bg-zinc-800 text-zinc-400'
+                                                        }`}>
+                                                            {targetLabel}
+                                                        </span>
+                                                    </div>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleRemoveReminder(rem.id)}
+                                                        className={`p-1 text-xs transition-colors ${
+                                                            isLight
+                                                                ? 'text-slate-400 hover:text-rose-600'
+                                                                : 'text-zinc-500 hover:text-rose-400'
+                                                        }`}
+                                                        title="Hatırlatıcıyı Kaldır"
+                                                    >
+                                                        ✕
+                                                    </button>
+                                                </div>
+                                            );
+                                        })
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* ── BÖLÜM 4: KONUM, PLATFORM & BAĞLANTILAR ── */}
+                            <div className={`p-4 rounded-2xl ${
+                                isLight 
+                                    ? 'bg-slate-50/80 border border-slate-200' 
+                                    : 'bg-zinc-900/70 border border-zinc-800'
+                            } space-y-3.5`}>
+                                <div className={`flex items-center justify-between border-b pb-2 ${
+                                    isLight ? 'border-slate-200' : 'border-zinc-800'
+                                }`}>
+                                    <span className={`text-xs font-bold uppercase tracking-wider ${
+                                        isLight ? 'text-slate-700' : 'text-zinc-300'
+                                    }`}>
+                                        Konum & Görüşme Platformu
+                                    </span>
+                                </div>
+
+                                {/* Hızlı Platform Kısayolları */}
+                                <div>
+                                    <span className={`text-[11px] font-semibold block mb-1.5 ${
+                                        isLight ? 'text-slate-500' : 'text-zinc-400'
+                                    }`}>
+                                        Hazır Platform / Konum Seç:
+                                    </span>
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                        {[
+                                            { name: '📹 Google Meet', url: 'https://meet.google.com/hsd-mtu' },
+                                            { name: '💬 Discord Ses', url: 'https://discord.gg/hsdmtu' },
+                                            { name: '🏛️ Mühendislik D-102', url: undefined },
+                                            { name: '🎤 Konferans Salonu', url: undefined },
+                                            { name: '🎪 Merkez Fuaye', url: undefined },
+                                        ].map((item, idx) => (
+                                            <button
+                                                key={idx}
+                                                type="button"
+                                                onClick={() => handleQuickLocation(item.name.replace(/^[^\s]+\s/, ''), item.url)}
+                                                className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition-colors ${
+                                                    isLight
+                                                        ? 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200 shadow-xs'
+                                                        : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700/80'
+                                                }`}
+                                            >
+                                                {item.name}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                                    <div>
+                                        <label className={`block text-xs font-bold mb-1 ${
+                                            isLight ? 'text-slate-600' : 'text-zinc-300'
+                                        }`}>Fiziksel / Dijital Konum</label>
+                                        <input
+                                            type="text"
+                                            value={location}
+                                            onChange={(e) => setLocation(e.target.value)}
+                                            placeholder="Örn: MTÜ Battalgazi Kampüsü veya Google Meet"
+                                            className={`w-full border rounded-xl px-3 py-2 text-xs font-medium focus:outline-none focus:border-rose-500 ${
+                                                isLight
+                                                    ? 'bg-white border-slate-300 text-slate-800 placeholder-slate-400'
+                                                    : 'bg-zinc-950 border-zinc-700 text-zinc-100 placeholder-zinc-500'
+                                            }`}
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className={`block text-xs font-bold mb-1 ${
+                                            isLight ? 'text-slate-600' : 'text-zinc-300'
+                                        }`}>Online Görüşme Linki</label>
+                                        <div className="flex gap-2">
+                                            <input
+                                                type="url"
+                                                value={meetingLink}
+                                                onChange={(e) => setMeetingLink(e.target.value)}
+                                                placeholder="https://meet.google.com/..."
+                                                className={`w-full border rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-rose-500 font-mono ${
+                                                    isLight
+                                                        ? 'bg-white border-slate-300 text-slate-800 placeholder-slate-400'
+                                                        : 'bg-zinc-950 border-zinc-700 text-zinc-100 placeholder-zinc-500'
+                                                }`}
+                                            />
+                                            {meetingLink && (
+                                                <a
+                                                    href={meetingLink}
+                                                    target="_blank"
+                                                    rel="noreferrer"
+                                                    className={`px-3 py-2 rounded-xl text-xs font-bold flex items-center justify-center shrink-0 border transition-colors ${
+                                                        isLight
+                                                            ? 'bg-white hover:bg-slate-100 text-rose-600 border-slate-300 shadow-xs'
+                                                            : 'bg-zinc-800 hover:bg-zinc-700 text-rose-300 hover:text-white border-zinc-700'
+                                                    }`}
+                                                    title="Bağlantıyı Yeni Sekmede Aç"
+                                                >
+                                                    ↗
+                                                </a>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* ── PROGRESSIVE DISCLOSURE: GELİŞMİŞ TAKVİM & WEBHOOK ENTEGRASYONLARI ── */}
+                                <div className={`rounded-xl border transition-all ${
+                                    isLight ? 'bg-slate-100/60 border-slate-200' : 'bg-zinc-950/60 border-zinc-800'
+                                }`}>
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowAdvancedDatetime(!showAdvancedDatetime)}
+                                        className="w-full p-2.5 flex items-center justify-between text-left cursor-pointer hover:opacity-90"
+                                    >
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-sm">⚡</span>
+                                            <div>
+                                                <span className={`text-xs font-bold block ${isLight ? 'text-slate-800' : 'text-zinc-200'}`}>
+                                                    Gelişmiş Entegrasyonlar (Meet, .ics & Webhook)
+                                                </span>
+                                                <span className={`text-[10px] ${isLight ? 'text-slate-500' : 'text-zinc-400'}`}>
+                                                    Topluluk Discord/Webhook duyurusu ve Google/Apple takvim bağlantıları
+                                                </span>
+                                            </div>
+                                        </div>
+                                        <span className={`text-xs font-bold transition-transform duration-200 ${showAdvancedDatetime ? 'rotate-180' : ''}`}>
+                                            ▼
+                                        </span>
+                                    </button>
+
+                                    {showAdvancedDatetime && (
+                                        <div className="p-3 pt-2 border-t border-slate-200 dark:border-zinc-800/80 space-y-2.5 animate-in fade-in duration-150">
+                                            <div className="flex flex-wrap items-center gap-2">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        window.open('https://meet.google.com/new', '_blank');
+                                                        if (!meetingLink) {
+                                                            setMeetingLink('https://meet.google.com/new');
+                                                        }
+                                                    }}
+                                                    className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border transition-colors ${
+                                                        isLight
+                                                            ? 'bg-blue-50 text-blue-700 hover:bg-blue-100 border-blue-200 shadow-xs'
+                                                            : 'bg-blue-950/40 text-blue-300 hover:bg-blue-900/60 border-blue-800'
+                                                    }`}
+                                                    title="Google Meet Başlat (Yeni Sekme)"
+                                                >
+                                                    <span>📹</span>
+                                                    <span>Google Meet Başlat</span>
+                                                </button>
+
+                                                <a
+                                                    href={getGoogleCalendarUrl()}
+                                                    target="_blank"
+                                                    rel="noreferrer"
+                                                    className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border transition-colors ${
+                                                        isLight
+                                                            ? 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border-emerald-200 shadow-xs'
+                                                            : 'bg-emerald-950/40 text-emerald-300 hover:bg-emerald-900/60 border-emerald-800'
+                                                    }`}
+                                                    title="Google Takvime Ekle"
+                                                >
+                                                    <span>📅</span>
+                                                    <span>Google Takvime Ekle</span>
+                                                </a>
+
+                                                <button
+                                                    type="button"
+                                                    onClick={handleDownloadICS}
+                                                    className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border transition-colors ${
+                                                        isLight
+                                                            ? 'bg-slate-100 text-slate-700 hover:bg-slate-200 border-slate-300 shadow-xs'
+                                                            : 'bg-zinc-800 text-zinc-200 hover:bg-zinc-700 border-zinc-700'
+                                                    }`}
+                                                    title="Apple & Outlook için .ics İndir"
+                                                >
+                                                    <span>📥</span>
+                                                    <span>Apple/Outlook (.ics)</span>
+                                                </button>
+
+                                                <button
+                                                    type="button"
+                                                    onClick={handleSendWebhook}
+                                                    disabled={isSendingWebhook}
+                                                    className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border transition-colors disabled:opacity-50 ${
+                                                        isLight
+                                                            ? 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border-indigo-200 shadow-xs'
+                                                            : 'bg-indigo-950/40 text-indigo-300 hover:bg-indigo-900/60 border-indigo-800'
+                                                    }`}
+                                                    title="Discord / Webhook ile Topluluğa Bildir"
+                                                >
+                                                    <span>📢</span>
+                                                    <span>{isSendingWebhook ? 'İletiliyor...' : 'Discord/Webhook ile Duyur'}</span>
+                                                </button>
+                                            </div>
+
+                                            {webhookFeedback && (
+                                                <div className={`p-2.5 rounded-xl border text-xs font-bold flex items-center gap-2 animate-in fade-in ${
+                                                    webhookFeedback.startsWith('✓')
+                                                        ? isLight ? 'bg-emerald-50 border-emerald-300 text-emerald-800' : 'bg-emerald-950/70 border-emerald-800 text-emerald-200'
+                                                        : isLight ? 'bg-amber-50 border-amber-300 text-amber-800' : 'bg-amber-950/70 border-amber-800 text-amber-200'
+                                                }`}>
+                                                    <span>{webhookFeedback}</span>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </>
+                    )}
+
+                    {/* ── SEKMELER: 4. KAYIT (RSVP) & DİJİTAL QR BİLET AYARLARI ── */}
+                    {(activeDrawerTab === 'rsvp' || activeDrawerTab === 'all') && (
+                        <>
+                            {activeDrawerTab === 'all' && (
+                                <div className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold border ${
+                                    isLight ? 'bg-slate-100 text-slate-800 border-slate-200' : 'bg-zinc-800/80 text-zinc-200 border-zinc-700'
+                                }`}>
+                                    <span>🎟️ 4. Kayıt & Katılımcılar (RSVP)</span>
+                                </div>
+                            )}
+                            {/* ── BÖLÜM 6.5: 🎟️ ETKİNLİK KAYIT (RSVP) & DİJİTAL QR BİLET AYARLARI ── */}
+                            <div className={`p-4 rounded-2xl ${
+                                isLight 
+                                    ? 'bg-slate-50/80 border border-slate-200' 
+                                    : 'bg-zinc-900/70 border border-zinc-800'
+                            } space-y-3.5`}>
+                                <div className={`flex items-center justify-between border-b pb-2 ${
+                                    isLight ? 'border-slate-200' : 'border-zinc-800'
+                                }`}>
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-sm">🎟️</span>
+                                        <span className={`text-xs font-bold uppercase tracking-wider ${
+                                            isLight ? 'text-slate-700' : 'text-zinc-200'
+                                        }`}>
+                                            Etkinlik Kayıt & QR Bilet Sistemi (RSVP)
+                                        </span>
+                                    </div>
+                                    <span className={`text-[10px] font-mono font-semibold px-2 py-0.5 rounded ${
+                                        rsvpEnabled
+                                            ? 'bg-rose-500 text-white'
+                                            : isLight ? 'bg-slate-200 text-slate-600' : 'bg-zinc-800 text-zinc-400'
+                                    }`}>
+                                        {rsvpEnabled ? 'KAYIT AKTİF' : 'KAPALI'}
+                                    </span>
+                                </div>
+
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                    {/* RSVP Açık / Kapalı */}
+                                    <label className={`p-3 rounded-xl border flex items-center justify-between cursor-pointer transition-colors ${
+                                        rsvpEnabled
+                                            ? isLight ? 'bg-rose-50/90 border-rose-300' : 'bg-rose-950/30 border-rose-800'
+                                            : isLight ? 'bg-white border-slate-200 hover:border-slate-300' : 'bg-zinc-950/60 border-zinc-800'
+                                    }`}>
+                                        <div className="flex items-center gap-2.5">
+                                            <span className="text-lg">✍️</span>
+                                            <div>
+                                                <span className={`text-xs font-bold block ${isLight ? 'text-slate-900' : 'text-zinc-100'}`}>
+                                                    Katılımcı Kaydı Açık (RSVP)
+                                                </span>
+                                                <span className={`text-[10px] ${isLight ? 'text-slate-500' : 'text-zinc-400'}`}>
+                                                    Öğrenciler isim & no ile kayıt olabilir
+                                                </span>
+                                            </div>
+                                        </div>
+                                        <input
+                                            type="checkbox"
+                                            checked={rsvpEnabled}
+                                            onChange={(e) => setRsvpEnabled(e.target.checked)}
+                                            className="w-4 h-4 text-rose-600 rounded focus:ring-rose-500"
+                                        />
+                                    </label>
+
+                                    {/* QR Kod Bilet Üretimi */}
+                                    <label className={`p-3 rounded-xl border flex items-center justify-between cursor-pointer transition-colors ${
+                                        rsvpQrEnabled
+                                            ? isLight ? 'bg-amber-50/90 border-amber-300' : 'bg-amber-950/30 border-amber-800'
+                                            : isLight ? 'bg-white border-slate-200 hover:border-slate-300' : 'bg-zinc-950/60 border-zinc-800'
+                                    }`}>
+                                        <div className="flex items-center gap-2.5">
+                                            <span className="text-lg">📱</span>
+                                            <div>
+                                                <span className={`text-xs font-bold block ${isLight ? 'text-slate-900' : 'text-zinc-100'}`}>
+                                                    Dijital QR Bilet Üret
+                                                </span>
+                                                <span className={`text-[10px] ${isLight ? 'text-slate-500' : 'text-zinc-400'}`}>
+                                                    Kayıt sonrası tekil QR bilet oluşturulur
+                                                </span>
+                                            </div>
+                                        </div>
+                                        <input
+                                            type="checkbox"
+                                            checked={rsvpQrEnabled}
+                                            onChange={(e) => setRsvpQrEnabled(e.target.checked)}
+                                            className="w-4 h-4 text-rose-600 rounded focus:ring-rose-500"
+                                        />
+                                    </label>
+                                </div>
+
+                                {rsvpEnabled && (
+                                    <div>
+                                        <label className={`block text-xs font-bold mb-1 ${
+                                            isLight ? 'text-slate-600' : 'text-zinc-300'
+                                        }`}>
+                                            Maksimum Katılımcı Kontenjanı (İsteğe Bağlı)
+                                        </label>
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            max="5000"
+                                            value={rsvpCapacity}
+                                            onChange={(e) => setRsvpCapacity(e.target.value ? Number(e.target.value) : '')}
+                                            placeholder="Örn: 100 (Boş bırakılırsa sınırsız kontenjan)"
+                                            className={`w-full border rounded-xl px-3 py-2 text-xs font-medium focus:outline-none focus:border-rose-500 ${
+                                                isLight
+                                                    ? 'bg-white border-slate-300 text-slate-800 placeholder-slate-400'
+                                                    : 'bg-zinc-950 border-zinc-700 text-zinc-100 placeholder-zinc-500'
+                                            }`}
+                                        />
+                                    </div>
+                                )}
+                            </div>
+                        </>
+                    )}
+                </form>
+
+                {/* ── SEKMELER: 4. KATILIMCILAR & DAHİLİ EKİP KATILIM ÖZETİ ── */}
+                {(activeDrawerTab === 'rsvp' || activeDrawerTab === 'all') && (
+                    <>
+                        {/* 👥 Dahili Ekip Katılım Özeti */}
+                        <div className={`p-4 rounded-2xl ${
+                            isLight 
+                                ? 'bg-slate-50/80 border border-slate-200' 
+                                : 'bg-zinc-900/70 border border-zinc-800'
+                        } space-y-3.5`}>
+                            <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b pb-2.5 ${
+                                isLight ? 'border-slate-200' : 'border-zinc-800'
+                            }`}>
+                                <div className="flex items-center gap-2">
+                                    <span className="text-base">🎯</span>
+                                    <div>
+                                        <h4 className={`text-xs font-bold uppercase tracking-wider ${
+                                            isLight ? 'text-slate-800' : 'text-zinc-100'
+                                        }`}>
+                                            Dahili Ekip Katılım Durumu
+                                        </h4>
+                                        <p className={`text-[10px] ${isLight ? 'text-slate-500' : 'text-zinc-400'}`}>
+                                            Topluluk üyelerinin haftalık bildirim popup'ından verdikleri yanıtlar
+                                        </p>
+                                    </div>
+                                </div>
+
+                                {/* İstatistik Rozetleri */}
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className={`text-[11px] font-bold px-2 py-0.5 rounded-lg border ${
+                                        isLight 
+                                            ? 'bg-emerald-50 border-emerald-200 text-emerald-800' 
+                                            : 'bg-emerald-950/50 border-emerald-800 text-emerald-300'
+                                    }`}>
+                                        🟢 {memberAttendanceList.filter(m => m.status === 'attending').length} Katılıyor
+                                    </span>
+                                    <span className={`text-[11px] font-bold px-2 py-0.5 rounded-lg border ${
+                                        isLight 
+                                            ? 'bg-rose-50 border-rose-200 text-rose-800' 
+                                            : 'bg-rose-950/50 border-rose-800 text-rose-300'
+                                    }`}>
+                                        🔴 {memberAttendanceList.filter(m => m.status === 'declined').length} Katılamıyor
+                                    </span>
+                                    <span className={`text-[11px] font-bold px-2 py-0.5 rounded-lg border ${
+                                        isLight 
+                                            ? 'bg-amber-50 border-amber-200 text-amber-800' 
+                                            : 'bg-amber-950/50 border-amber-800 text-amber-300'
+                                    }`}>
+                                        🟡 {memberAttendanceList.filter(m => m.status === 'maybe').length} Kararsız
+                                    </span>
+                                </div>
+                            </div>
+
+                            {/* Katılamayanlar Uyarısı */}
+                            {memberAttendanceList.filter(m => m.status === 'declined').length > 0 && (
+                                <div className={`p-2.5 rounded-xl border flex items-center gap-2 text-xs font-medium ${
+                                    isLight 
+                                        ? 'bg-rose-50/70 border-rose-200 text-rose-900' 
+                                        : 'bg-rose-950/30 border-rose-900/60 text-rose-300'
+                                }`}>
+                                    <span className="text-base">📢</span>
+                                    <span>
+                                        <strong>{memberAttendanceList.filter(m => m.status === 'declined').length} üye</strong> katılamayacağını bildirdi. Bildirimler ve mazeretler yöneticilere otomatik olarak iletilmiştir.
+                                    </span>
+                                </div>
+                            )}
+
+                            {/* Filtreleme Butonları */}
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                                {(['all', 'attending', 'declined', 'maybe'] as const).map(flt => {
+                                    const count = flt === 'all' 
+                                        ? memberAttendanceList.length 
+                                        : memberAttendanceList.filter(m => m.status === flt).length;
+                                    const label = flt === 'all' ? 'Tümü' : flt === 'attending' ? 'Katılanlar' : flt === 'declined' ? 'Katılmayanlar' : 'Kararsızlar';
+                                    return (
+                                        <button
+                                            key={flt}
+                                            type="button"
+                                            onClick={() => setAttendanceFilter(flt)}
+                                            className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
+                                                attendanceFilter === flt
+                                                    ? isLight 
+                                                        ? 'bg-rose-600 text-white shadow-xs' 
+                                                        : 'bg-rose-600 text-white shadow-xs'
+                                                    : isLight 
+                                                        ? 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100' 
+                                                        : 'bg-zinc-950 border border-zinc-800 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+                                            }`}
+                                        >
+                                            {label} ({count})
+                                        </button>
+                                    );
+                                })}
+                            </div>
+
+                            {/* Liste */}
+                            <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                                {!event ? (
+                                    <p className={`text-xs italic text-center py-4 ${isLight ? 'text-slate-400' : 'text-zinc-500'}`}>
+                                        Etkinliği kaydettikten sonra ekip üyeleri katılım bildiriminde bulunabilir.
+                                    </p>
+                                ) : memberAttendanceList.length === 0 ? (
+                                    <p className={`text-xs italic text-center py-4 ${isLight ? 'text-slate-400' : 'text-zinc-500'}`}>
+                                        Henüz bu etkinlik için katılım bildirimi yapan ekip üyesi bulunmuyor.
+                                    </p>
+                                ) : (
+                                    memberAttendanceList
+                                        .filter(m => attendanceFilter === 'all' || m.status === attendanceFilter)
+                                        .map((item, idx) => (
+                                            <div
+                                                key={`${item.user_id}-${idx}`}
+                                                className={`p-2.5 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-2 transition-colors ${
+                                                    isLight 
+                                                        ? 'bg-white border-slate-200 hover:border-slate-300' 
+                                                        : 'bg-zinc-950 border-zinc-800 hover:border-zinc-700'
+                                                }`}
+                                            >
+                                                <div className="flex items-center gap-2.5 min-w-0">
+                                                    {item.user_avatar ? (
+                                                        <img
+                                                            src={item.user_avatar}
+                                                            alt={item.user_name}
+                                                            className="w-7 h-7 rounded-full object-cover ring-1 ring-white/10 shrink-0"
+                                                        />
+                                                    ) : (
+                                                        <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-rose-600 to-amber-600 flex items-center justify-center text-[10px] font-bold text-white shrink-0">
+                                                            {item.user_name.substring(0, 2).toUpperCase()}
+                                                        </div>
+                                                    )}
+                                                    <div className="min-w-0">
+                                                        <div className="flex items-center gap-1.5 flex-wrap">
+                                                            <span className={`text-xs font-bold truncate ${isLight ? 'text-slate-900' : 'text-white'}`}>
+                                                                {item.user_name}
+                                                            </span>
+                                                            {item.role && (
+                                                                <span className={`text-[9px] font-mono px-1.5 py-0.2 rounded font-semibold ${
+                                                                    item.role === 'super_admin'
+                                                                        ? isLight ? 'bg-amber-100 text-amber-800' : 'bg-amber-950/60 text-amber-300'
+                                                                        : item.role === 'workspace_admin'
+                                                                            ? isLight ? 'bg-rose-100 text-rose-800' : 'bg-rose-950/60 text-rose-300'
+                                                                            : isLight ? 'bg-slate-100 text-slate-700' : 'bg-zinc-800 text-zinc-300'
+                                                                }`}>
+                                                                    {item.role}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                        {item.reason && (
+                                                            <p className={`text-[11px] mt-0.5 font-medium flex items-center gap-1 ${
+                                                                item.status === 'declined' 
+                                                                    ? isLight ? 'text-rose-600' : 'text-rose-400' 
+                                                                    : isLight ? 'text-amber-600' : 'text-amber-400'
+                                                            }`}>
+                                                                <span>💬 Mazeret:</span>
+                                                                <span className="italic font-normal">"{item.reason}"</span>
+                                                            </p>
+                                                        )}
+                                                    </div>
+                                                </div>
+
+                                                <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
+                                                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                                                        item.status === 'attending'
+                                                            ? isLight 
+                                                                ? 'bg-emerald-50 border-emerald-200 text-emerald-800' 
+                                                                : 'bg-emerald-950/60 border-emerald-800 text-emerald-300'
+                                                            : item.status === 'declined'
+                                                                ? isLight 
+                                                                    ? 'bg-rose-50 border-rose-200 text-rose-800' 
+                                                                    : 'bg-rose-950/60 border-rose-800 text-rose-300'
+                                                                : isLight 
+                                                                    ? 'bg-amber-50 border-amber-200 text-amber-800' 
+                                                                    : 'bg-amber-950/60 border-amber-800 text-amber-300'
+                                                    }`}>
+                                                        {item.status === 'attending' ? '✓ Katılıyor' : item.status === 'declined' ? '✕ Katılamıyor' : '? Kararsız'}
+                                                    </span>
+                                                    <span className={`text-[10px] font-mono ${isLight ? 'text-slate-400' : 'text-zinc-500'}`}>
+                                                        {new Date(item.responded_at).toLocaleDateString('tr-TR', { day: 'numeric', month: 'short' })}
+                                                    </span>
+                                                </div>
+                                            </div>
+                                        ))
+                                )}
+                            </div>
+                        </div>
+
+                        {/* ── BÖLÜM 6.6: 👥 KAYITLI KATILIMCILAR & CHECK-IN YÖNETİMİ ── */}
+                        {event && rsvpEnabled && (
+                            <div className={`p-4 rounded-2xl ${
+                                isLight 
+                                    ? 'bg-slate-50/80 border border-slate-200' 
+                                    : 'bg-zinc-900/70 border border-zinc-800'
+                            } space-y-3`}>
+                                <div className={`flex items-center justify-between border-b pb-2 ${
+                                    isLight ? 'border-slate-200' : 'border-zinc-800'
+                                }`}>
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-sm">👥</span>
+                                        <span className={`text-xs font-bold uppercase tracking-wider ${
+                                            isLight ? 'text-slate-700' : 'text-zinc-200'
+                                        }`}>
+                                            Katılımcı Listesi ({attendees.length}{rsvpCapacity ? ` / ${rsvpCapacity}` : ''})
+                                        </span>
+                                    </div>
+
+                                    <button
+                                        type="button"
+                                        onClick={handleExportCSV}
+                                        disabled={attendees.length === 0}
+                                        className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border transition-colors disabled:opacity-40 ${
+                                            isLight
+                                                ? 'bg-emerald-600 hover:bg-emerald-700 text-white border-emerald-700 shadow-xs'
+                                                : 'bg-emerald-700 hover:bg-emerald-600 text-white border-emerald-600'
+                                        }`}
+                                    >
+                                        <span>📥</span>
+                                        <span>Excel / CSV İndir</span>
+                                    </button>
+                                </div>
+
+                                {isLoadingAttendees ? (
+                                    <div className={`p-4 text-center text-xs ${isLight ? 'text-slate-400' : 'text-zinc-500'}`}>
+                                        Katılımcı listesi yükleniyor...
+                                    </div>
+                                ) : attendees.length === 0 ? (
+                                    <div className={`p-4 rounded-xl border text-center text-xs italic ${
+                                        isLight ? 'bg-white border-slate-200 text-slate-400' : 'bg-zinc-950 border-zinc-800 text-zinc-500'
+                                    }`}>
+                                        Henüz kayıt yaptıran katılımcı bulunmuyor.
+                                    </div>
+                                ) : (
+                                    <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                                        {attendees.map((attendee) => {
+                                            const isCheckedIn = attendee.status === 'checked_in';
+                                            return (
+                                                <div
+                                                    key={attendee.id}
+                                                    className={`p-2.5 rounded-xl border text-xs flex items-center justify-between gap-3 transition-colors ${
+                                                        isLight
+                                                            ? 'bg-white border-slate-200 hover:border-slate-300'
+                                                            : 'bg-zinc-950 border-zinc-800 hover:border-zinc-700'
+                                                    }`}
+                                                >
+                                                    <div className="flex items-center gap-2.5 min-w-0">
+                                                        <div className={`w-7 h-7 rounded-lg flex items-center justify-center font-bold text-xs shrink-0 ${
+                                                            isCheckedIn
+                                                                ? 'bg-emerald-500 text-white'
+                                                                : isLight ? 'bg-slate-100 text-slate-700' : 'bg-zinc-800 text-zinc-300'
+                                                        }`}>
+                                                            {isCheckedIn ? '✓' : attendee.full_name?.substring(0, 1).toUpperCase()}
+                                                        </div>
+                                                        <div className="min-w-0">
+                                                            <div className="flex items-center gap-2">
+                                                                <span className={`font-bold truncate ${isLight ? 'text-slate-900' : 'text-zinc-100'}`}>
+                                                                    {attendee.full_name}
+                                                                </span>
+                                                                <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded shrink-0 ${
+                                                                    isLight ? 'bg-slate-100 text-slate-600' : 'bg-zinc-800 text-zinc-400'
+                                                                }`}>
+                                                                    {attendee.ticket_code}
+                                                                </span>
+                                                            </div>
+                                                            <div className={`text-[10px] truncate ${isLight ? 'text-slate-500' : 'text-zinc-400'}`}>
+                                                                {attendee.department || 'Bölüm Yok'} • {attendee.student_number || attendee.email}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleToggleCheckIn(attendee.id, attendee.status)}
+                                                        className={`px-2.5 py-1 rounded-lg text-xs font-semibold shrink-0 border transition-colors ${
+                                                            isCheckedIn
+                                                                ? isLight
+                                                                    ? 'bg-emerald-100 text-emerald-800 border-emerald-300 hover:bg-emerald-200'
+                                                                    : 'bg-emerald-950/60 text-emerald-300 border-emerald-800 hover:bg-emerald-900/60'
+                                                                : isLight
+                                                                    ? 'bg-slate-100 text-slate-700 border-slate-300 hover:bg-slate-200'
+                                                                    : 'bg-zinc-800 text-zinc-300 border-zinc-700 hover:bg-zinc-700'
+                                                        }`}
+                                                    >
+                                                        {isCheckedIn ? '✓ Katıldı' : 'Giriş Onayla'}
+                                                    </button>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </>
+                )}
+
+                {/* ── SEKMELER: 5. GÖREVLER & DOSYALAR ── */}
+                {(activeDrawerTab === 'tasks' || activeDrawerTab === 'all') && (
+                    <>
+                        {activeDrawerTab === 'all' && (
+                            <div className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold border ${
+                                isLight ? 'bg-slate-100 text-slate-800 border-slate-200' : 'bg-zinc-800/80 text-zinc-200 border-zinc-700'
+                            }`}>
+                                <span>✅ 5. Görevler & Ekli Dosyalar</span>
+                            </div>
+                        )}
+                        {/* ── BÖLÜM 7: GÖREV KONTROL LİSTESİ (CHECKLIST & İLERLEME ÇUBUĞU) ── */}
+                        <div className={`p-4 rounded-2xl ${
+                            isLight 
+                                ? 'bg-slate-50/80 border border-slate-200' 
+                                : 'bg-zinc-900/70 border border-zinc-800'
+                        } space-y-3.5`}>
+                            <div className={`flex items-center justify-between border-b pb-2 ${
+                                isLight ? 'border-slate-200' : 'border-zinc-800'
+                            }`}>
+                                <div className="flex items-center gap-2">
+                                    <span className={`text-xs font-bold uppercase tracking-wider ${
+                                        isLight ? 'text-slate-700' : 'text-zinc-200'
+                                    }`}>
+                                        Görev Kontrol Listesi ({completedSubtasksCount}/{subtasks.length})
+                                    </span>
+                                    {subtasks.length > 0 && (
+                                        <span className={`text-xs font-mono px-2 py-0.5 rounded-full font-bold border ${
+                                            isLight 
+                                                ? 'bg-rose-50 text-rose-600 border-rose-200' 
+                                                : 'bg-zinc-800 text-rose-300 border-zinc-700'
+                                        }`}>
+                                            %{progressPercent}
+                                        </span>
+                                    )}
+                                </div>
+
+                                {subtasks.length > 0 && (
+                                    <div className="flex items-center gap-2 text-xs">
+                                        <button
+                                            type="button"
+                                            onClick={handleToggleAllSubtasks}
+                                            className={`transition-colors text-[11px] ${
+                                                isLight ? 'text-slate-500 hover:text-slate-900' : 'text-zinc-400 hover:text-white'
+                                            }`}
+                                        >
+                                            {subtasks.every(s => s.is_completed) ? 'İşaretleri Kaldır' : 'Tümünü Tamamla'}
+                                        </button>
+                                        <span className={isLight ? 'text-slate-300' : 'text-zinc-600'}>•</span>
+                                        <button
+                                            type="button"
+                                            onClick={handleClearCompletedSubtasks}
+                                            className={`transition-colors text-[11px] ${
+                                                isLight ? 'text-slate-500 hover:text-rose-600' : 'text-zinc-400 hover:text-rose-400'
+                                            }`}
+                                        >
+                                            Bitenleri Temizle
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* İlerleme Çubuğu */}
+                            {subtasks.length > 0 && (
+                                <div className={`w-full h-2 rounded-full overflow-hidden ${
+                                    isLight ? 'bg-slate-200' : 'bg-zinc-800'
+                                }`}>
+                                    <div
+                                        className="h-full bg-gradient-to-r from-rose-600 to-rose-400 transition-all duration-300"
+                                        style={{ width: `${progressPercent}%` }}
+                                    />
+                                </div>
+                            )}
+
+                            {/* Hazır Görev Setleri Ekleme Butonları */}
+                            <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                                <span className={`text-[11px] font-semibold mr-1 ${
+                                    isLight ? 'text-slate-500' : 'text-zinc-400'
+                                }`}>Hazır Maddeler Ekle:</span>
+                                <button
+                                    type="button"
+                                    onClick={() => handleAddPresetChecklist('tech')}
+                                    className={`px-2 py-0.5 rounded-lg text-[11px] font-medium border transition-colors ${
+                                        isLight 
+                                            ? 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200 shadow-xs' 
+                                            : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border-transparent'
+                                    }`}
+                                >
+                                    + Kod/Teknik
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => handleAddPresetChecklist('event')}
+                                    className={`px-2 py-0.5 rounded-lg text-[11px] font-medium border transition-colors ${
+                                        isLight 
+                                            ? 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200 shadow-xs' 
+                                            : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border-transparent'
+                                    }`}
+                                >
+                                    + Lojistik/Salon
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => handleAddPresetChecklist('social')}
+                                    className={`px-2 py-0.5 rounded-lg text-[11px] font-medium border transition-colors ${
+                                        isLight 
+                                            ? 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200 shadow-xs' 
+                                            : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border-transparent'
+                                    }`}
+                                >
+                                    + Medya/Duyuru
+                                </button>
+                            </div>
+
+                            {/* Yeni Görev Ekleme Formu */}
+                            <form onSubmit={handleAddSubtask} className="flex gap-2">
+                                <input
+                                    type="text"
+                                    value={newSubtaskTitle}
+                                    onChange={(e) => setNewSubtaskTitle(e.target.value)}
+                                    placeholder="+ Yeni kontrol maddesi ekle (örn: Konuşmacı slaytı kontrol edildi)..."
+                                    className={`flex-1 border rounded-xl px-3 py-2 text-xs font-medium focus:outline-none focus:border-rose-500 ${
+                                        isLight
+                                            ? 'bg-white border-slate-300 text-slate-800 placeholder-slate-400'
+                                            : 'bg-zinc-950 border-zinc-700 text-zinc-100 placeholder-zinc-500'
+                                    }`}
+                                />
+                                <button
+                                    type="submit"
+                                    className={`px-4 py-2 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer shadow-sm ${
+                                        isLight
+                                            ? 'bg-rose-600 hover:bg-rose-700 text-white active:scale-95'
+                                            : 'bg-rose-600 hover:bg-rose-700 text-white active:scale-95'
+                                    }`}
+                                >
+                                    Ekle
+                                </button>
+                            </form>
+
+                            {/* Görev Maddeleri Listesi */}
+                            <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1">
+                                {subtasks.map(task => (
+                                    <div
+                                        key={task.id}
+                                        className={`flex items-center justify-between p-2.5 rounded-xl border transition-colors group ${
+                                            isLight
+                                                ? 'bg-white border-slate-200 hover:border-slate-300'
+                                                : 'bg-zinc-950 border-zinc-800 hover:border-zinc-700'
+                                        }`}
+                                    >
+                                        <label className="flex items-center gap-3 cursor-pointer flex-1 text-xs">
+                                            <input
+                                                type="checkbox"
+                                                checked={task.is_completed}
+                                                onChange={() => handleToggleSubtask(task.id, task.is_completed)}
+                                                className={`w-4 h-4 rounded text-rose-600 focus:ring-0 cursor-pointer ${
+                                                    isLight ? 'border-slate-300 bg-white' : 'border-zinc-700 bg-zinc-800'
+                                                }`}
+                                            />
+                                            <span className={`font-semibold ${
+                                                task.is_completed 
+                                                    ? isLight ? 'line-through text-slate-400' : 'line-through text-zinc-500'
+                                                    : isLight ? 'text-slate-800' : 'text-zinc-100'
+                                            }`}>
+                                                {task.title}
+                                            </span>
+                                        </label>
+                                        <button
+                                            type="button"
+                                            onClick={() => handleDeleteSubtask(task.id)}
+                                            className={`opacity-0 group-hover:opacity-100 p-1 text-xs transition-opacity ${
+                                                isLight ? 'text-slate-400 hover:text-rose-600' : 'text-zinc-500 hover:text-rose-400'
+                                            }`}
+                                            title="Görevi Sil"
+                                        >
+                                            ✕
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+
+                        {/* ── BÖLÜM 8: DOSYA EKLERİ (25MB DOĞRULAMA) ── */}
+                        <div className={`p-4 rounded-2xl ${
+                            isLight 
+                                ? 'bg-slate-50/80 border border-slate-200' 
+                                : 'bg-zinc-900/70 border border-zinc-800'
+                        } space-y-3`}>
+                            <div className={`flex items-center justify-between border-b pb-2 ${
+                                isLight ? 'border-slate-200' : 'border-zinc-800'
+                            }`}>
+                                <span className={`text-xs font-bold uppercase tracking-wider ${
+                                    isLight ? 'text-slate-700' : 'text-zinc-200'
+                                }`}>
+                                    Dosya Ekleri (Maks. 25MB)
+                                </span>
+                                <label className={`cursor-pointer px-3 py-1.5 rounded-xl text-xs font-bold border transition-colors ${
+                                    isLight
+                                        ? 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200 shadow-xs'
+                                        : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border-zinc-700'
+                                }`}>
+                                    {isUploading ? 'Yükleniyor...' : '+ Dosya Yükle'}
+                                    <input
+                                        type="file"
+                                        className="hidden"
+                                        disabled={isUploading}
+                                        onChange={handleFileUpload}
+                                    />
+                                </label>
+                            </div>
+
+                            {/* 🚀 Upload Progress Ring */}
+                            {isUploading && (
+                                <div className="py-1 animate-in fade-in zoom-in-95 duration-200">
+                                    <UploadProgressRing
+                                        progress={uploadProgress}
+                                        fileName={uploadingFileName || 'Dosya'}
+                                        isLight={isLight}
+                                    />
+                                </div>
+                            )}
+
+                            {attachments.length > 0 ? (
+                                <div className="space-y-2">
+                                    {attachments.map(att => (
+                                        <div
+                                            key={att.id}
+                                            className={`flex items-center justify-between p-3 rounded-xl border text-xs ${
+                                                isLight
+                                                    ? 'bg-white border-slate-200'
+                                                    : 'bg-zinc-950 border-zinc-800'
+                                            }`}
+                                        >
+                                            <div className="flex items-center gap-2.5 overflow-hidden">
+                                                <span className={`p-1.5 rounded-lg text-sm ${
+                                                    isLight ? 'bg-slate-100 text-slate-700' : 'bg-zinc-800 text-zinc-200'
+                                                }`}>📄</span>
+                                                <div className="truncate">
+                                                    <p className={`font-bold truncate ${isLight ? 'text-slate-800' : 'text-zinc-200'}`}>{att.file_name}</p>
+                                                    <p className={`text-[11px] ${isLight ? 'text-slate-500' : 'text-zinc-400'}`}>
+                                                        {(att.file_size / 1024 / 1024).toFixed(2)} MB • {att.uploaded_by}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                            <span className={`text-[10px] font-mono px-2 py-0.5 rounded border ${
+                                                isLight 
+                                                    ? 'text-emerald-700 bg-emerald-50 border-emerald-200' 
+                                                    : 'text-emerald-400 bg-emerald-950/40 border-emerald-900/50'
+                                            }`}>
+                                                Doğrulandı
+                                            </span>
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : (
+                                <p className={`text-xs italic ${isLight ? 'text-slate-400' : 'text-zinc-500'}`}>Bu etkinliğe henüz dosya eklenmedi.</p>
+                            )}
+                        </div>
+                    </>
+                )}
+
+                {/* ── SEKMELER: 6. İLETİŞİM, YORUMLAR & GEÇMİŞ ── */}
+                {(activeDrawerTab === 'communication' || activeDrawerTab === 'all') && (
+                    <>
+                        {activeDrawerTab === 'all' && (
+                            <div className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold border ${
+                                isLight ? 'bg-slate-100 text-slate-800 border-slate-200' : 'bg-zinc-800/80 text-zinc-200 border-zinc-700'
+                            }`}>
+                                <span>💬 6. İletişim, Yorumlar & Ekip Notları</span>
+                            </div>
+                        )}
+                        {/* ── BÖLÜM 9: ⚡ ANLIK DUYURU & EKİP BİLDİRİMİ DAĞITIMI ── */}
+                        <div className={`p-4 rounded-2xl ${
+                            isLight 
+                                ? 'bg-gradient-to-br from-rose-50/60 to-rose-100/30 border border-rose-200' 
+                                : 'bg-rose-950/20 border border-rose-900/50'
+                        } space-y-3.5`}>
+                            <div className={`flex items-center justify-between border-b pb-2 ${
+                                isLight ? 'border-rose-200/80' : 'border-rose-900/40'
+                            }`}>
+                                <div className="flex items-center gap-2">
+                                    <span className="text-rose-500 text-base">⚡</span>
+                                    <span className={`text-xs font-bold uppercase tracking-wider ${
+                                        isLight ? 'text-rose-950' : 'text-rose-200'
+                                    }`}>
+                                        Anlık Duyuru & Ekip Bildirimi (Canlı Dağıtım)
+                                    </span>
+                                </div>
+                                <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-bold border ${
+                                    isLight 
+                                        ? 'bg-rose-100 text-rose-700 border-rose-200' 
+                                        : 'bg-rose-900/60 text-rose-300 border border-rose-800'
+                                }`}>
+                                    Anlık Bildirim
+                                </span>
+                            </div>
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                                <div>
+                                    <label className={`block mb-1 font-bold ${
+                                        isLight ? 'text-slate-700' : 'text-zinc-300'
+                                    }`}>Hedef Kitle</label>
+                                    <select
+                                        value={announcementAudience}
+                                        onChange={(e) => setAnnouncementAudience(e.target.value as any)}
+                                        className={`w-full border rounded-xl px-3 py-2 font-medium ${
+                                            isLight 
+                                                ? 'bg-white border-slate-300 text-slate-800' 
+                                                : 'bg-zinc-900 border-zinc-700 text-zinc-200'
+                                        }`}
+                                    >
+                                        <option value="group">Özel Komite / Ekip</option>
+                                        <option value="all">Tüm Topluluk Üyeleri</option>
+                                        <option value="role">Belirli Rol Seviyesi</option>
+                                    </select>
+                                </div>
+
+                                {announcementAudience === 'group' && (
+                                    <div>
+                                        <label className={`block mb-1 font-bold ${
+                                            isLight ? 'text-slate-700' : 'text-zinc-300'
+                                        }`}>Komite Seç</label>
+                                        <select
+                                            value={selectedGroupId}
+                                            onChange={(e) => setSelectedGroupId(e.target.value)}
+                                            className={`w-full border rounded-xl px-3 py-2 font-medium ${
+                                                isLight 
+                                                    ? 'bg-white border-slate-300 text-slate-800' 
+                                                    : 'bg-zinc-900 border-zinc-700 text-zinc-200'
+                                            }`}
+                                        >
+                                            {groups.map(g => (
+                                                <option key={g.id} value={g.id}>{g.name}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                )}
+
+                                {announcementAudience === 'role' && (
+                                    <div>
+                                        <label className={`block mb-1 font-bold ${
+                                            isLight ? 'text-slate-700' : 'text-zinc-300'
+                                        }`}>Rol Seç</label>
+                                        <select
+                                            value={selectedRole}
+                                            onChange={(e) => setSelectedRole(e.target.value as any)}
+                                            className={`w-full border rounded-xl px-3 py-2 font-medium ${
+                                                isLight 
+                                                    ? 'bg-white border-slate-300 text-slate-800' 
+                                                    : 'bg-zinc-900 border-zinc-700 text-zinc-200'
+                                            }`}
+                                        >
+                                            <option value="super_admin">Super Admin</option>
+                                            <option value="workspace_admin">Workspace Admin</option>
+                                            <option value="editor">Editor</option>
+                                            <option value="contributor">Contributor</option>
+                                            <option value="viewer">Viewer</option>
+                                        </select>
+                                    </div>
+                                )}
+                            </div>
+
+                            <input
+                                type="text"
+                                value={announcementMsg}
+                                onChange={(e) => setAnnouncementMsg(e.target.value)}
+                                placeholder="Özel duyuru notu (boş bırakılırsa etkinlik özeti iletilir)..."
+                                className={`w-full border rounded-xl px-3.5 py-2.5 text-xs focus:outline-none focus:border-rose-500 font-medium ${
+                                    isLight 
+                                        ? 'bg-white border-slate-300 text-slate-800 placeholder-slate-400' 
+                                        : 'bg-zinc-900 border-zinc-800 text-zinc-100 placeholder-zinc-500'
+                                }`}
+                            />
+
+                            <div className="flex items-center justify-between pt-1">
+                                <button
+                                    type="button"
+                                    onClick={handleSendInstantAnnouncement}
+                                    disabled={isSendingAnnouncement}
+                                    className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs flex items-center gap-1.5 shadow-md shadow-rose-950/40 transition-all disabled:opacity-50"
+                                >
+                                    {isSendingAnnouncement ? 'Gönderiliyor...' : '⚡ Anlık Duyur'}
+                                </button>
+                                {announcementSuccess && (
+                                    <span className={`text-xs font-bold animate-in fade-in ${
+                                        isLight ? 'text-emerald-700' : 'text-emerald-400'
+                                    }`}>
+                                        ✓ Ekip Bildirimi Başarıyla Dağıtıldı!
+                                    </span>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* ── BÖLÜM 10: YORUMLAR & EKİP NOTLARI (KURUMSAL SEVİYE) ── */}
+                        <div className={`p-4 rounded-2xl ${
+                            isLight 
+                                ? 'bg-slate-50/80 border border-slate-200' 
+                                : 'bg-zinc-900/70 border border-zinc-800'
+                        } space-y-4`}>
+                            <div className={`flex items-center justify-between border-b pb-2 ${
+                                isLight ? 'border-slate-200' : 'border-zinc-800'
+                            }`}>
+                                <div className="flex items-center gap-2">
+                                    <span className="text-sm">💬</span>
+                                    <span className={`text-xs font-bold uppercase tracking-wider ${
+                                        isLight ? 'text-slate-700' : 'text-zinc-200'
+                                    }`}>
+                                        Yorumlar & Ekip Notları ({comments.length})
+                                    </span>
+                                </div>
+                                <span className={`text-[10px] font-mono ${
+                                    isLight ? 'text-slate-500' : 'text-zinc-400'
+                                }`}>
+                                    {comments.filter(c => c.is_pinned).length > 0 && `${comments.filter(c => c.is_pinned).length} Sabitlendi • `}
+                                    Kurumsal İşbirliği
+                                </span>
+                            </div>
+
+                            {/* Yeni Yorum / Ekip Notu Formu */}
+                            {canComment ? (
+                                <form onSubmit={handleAddComment} className="space-y-2">
+                                    {commentError && (
+                                        <div className="p-2.5 rounded-xl bg-rose-950/80 border border-rose-700 text-rose-200 text-xs flex items-center justify-between">
+                                            <span>{commentError}</span>
+                                            <button type="button" onClick={() => setCommentError(null)} className="text-rose-400 hover:text-white font-bold ml-2">✕</button>
+                                        </div>
+                                    )}
+                                    <div className="flex gap-2">
+                                        <select
+                                            value={newCommentTag}
+                                            onChange={(e) => setNewCommentTag(e.target.value as any)}
+                                            className={`border rounded-xl px-2.5 py-2 text-xs font-semibold focus:outline-none focus:border-rose-500 shrink-0 ${
+                                                isLight 
+                                                    ? 'bg-white border-slate-300 text-slate-800' 
+                                                    : 'bg-zinc-950 border-zinc-700 text-zinc-200'
+                                            }`}
+                                        >
+                                            <option value="general">💬 Genel</option>
+                                            <option value="idea">💡 Fikir</option>
+                                            <option value="decision">✅ Karar</option>
+                                            <option value="blocker">⚠️ Engel</option>
+                                            <option value="info">📌 Bilgi</option>
+                                        </select>
+                                        <input
+                                            type="text"
+                                            value={newCommentText}
+                                            onChange={(e) => setNewCommentText(e.target.value)}
+                                            onKeyDown={(e) => {
+                                                if (e.key === 'Enter' && !e.shiftKey) {
+                                                    e.preventDefault();
+                                                    handleAddComment(e);
+                                                }
+                                            }}
+                                            placeholder="Bir güncelleme, karar veya ekip notu yazın..."
+                                            className={`flex-1 border rounded-xl px-3.5 py-2 text-xs focus:outline-none focus:border-rose-500 font-medium ${
+                                                isLight 
+                                                    ? 'bg-white border-slate-300 text-slate-800 placeholder-slate-400' 
+                                                    : 'bg-zinc-950 border-zinc-700 text-zinc-100 placeholder-zinc-500'
+                                            }`}
+                                        />
+                                        <button
+                                            type="submit"
+                                            disabled={isAddingComment || !newCommentText.trim()}
+                                            className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-xs font-bold text-white transition-colors shrink-0 shadow-sm disabled:opacity-50 flex items-center gap-1.5 cursor-pointer"
+                                        >
+                                            {isAddingComment ? (
+                                                <>
+                                                    <svg className="animate-spin h-3.5 w-3.5 text-white" fill="none" viewBox="0 0 24 24">
+                                                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+                                                    </svg>
+                                                    <span>Ekleniyor...</span>
+                                                </>
+                                            ) : (
+                                                <span>Ekle</span>
+                                            )}
+                                        </button>
+                                    </div>
+                                </form>
+                            ) : (
+                                <div className={`p-3.5 rounded-xl border flex items-center gap-3 ${
+                                    isLight ? 'bg-amber-50/80 border-amber-200 text-amber-900' : 'bg-amber-950/30 border-amber-800/80 text-amber-300'
+                                }`}>
+                                    <span className="text-lg shrink-0">🔒</span>
+                                    <p className="text-xs">
+                                        <strong className="font-semibold">Yorum Yetkisi Kısıtlı: </strong>
+                                        Etkinliklere ekip değerlendirme notu ve yorum eklemek için en az <strong>Contributor (Katkıda Bulunan)</strong> rolü veya <strong>can_comment</strong> yetkisi gereklidir.
+                                    </p>
+                                </div>
+                            )}
+
+                            {/* Yorumlar Listesi (Sabitlenenler En Üstte) */}
+                            <div className="space-y-2.5 max-h-64 overflow-y-auto pr-1">
+                                {comments.length === 0 ? (
+                                    <p className={`text-xs italic text-center py-4 ${
+                                        isLight ? 'text-slate-400' : 'text-zinc-500'
+                                    }`}>
+                                        Henüz bir ekip notu veya değerlendirme eklenmedi. İlk notu siz ekleyin.
+                                    </p>
+                                ) : (
+                                    [...comments]
+                                        .sort((a, b) => (b.is_pinned ? 1 : 0) - (a.is_pinned ? 1 : 0))
+                                        .map(c => {
+                                            const isPinned = Boolean(c.is_pinned);
+                                            const canDelete = currentMember?.role === 'super_admin' ||
+                                                currentMember?.role === 'workspace_admin' ||
+                                                c.user_id === currentMember?.id;
+
+                                            const tagBadge = {
+                                                idea: { 
+                                                    label: '💡 Fikir', 
+                                                    color: isLight ? 'bg-purple-50 border-purple-200 text-purple-700' : 'bg-purple-950/70 border-purple-800 text-purple-300' 
+                                                },
+                                                decision: { 
+                                                    label: '✅ Karar', 
+                                                    color: isLight ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-emerald-950/70 border-emerald-800 text-emerald-300' 
+                                                },
+                                                blocker: { 
+                                                    label: '⚠️ Engel', 
+                                                    color: isLight ? 'bg-rose-50 border-rose-200 text-rose-700' : 'bg-rose-950/70 border-rose-800 text-rose-300' 
+                                                },
+                                                info: { 
+                                                    label: '📌 Bilgi', 
+                                                    color: isLight ? 'bg-sky-50 border-sky-200 text-sky-700' : 'bg-sky-950/70 border-sky-800 text-sky-300' 
+                                                },
+                                                general: { 
+                                                    label: '💬 Not', 
+                                                    color: isLight ? 'bg-slate-100 border-slate-200 text-slate-700' : 'bg-zinc-800 border-zinc-700 text-zinc-400' 
+                                                },
+                                            }[c.tag || 'general'];
+
+                                            return (
+                                                <div
+                                                    key={c.id}
+                                                    className={`p-3 rounded-xl border text-xs space-y-2 transition-all ${
+                                                        isPinned
+                                                            ? isLight 
+                                                                ? 'bg-amber-50/70 border-amber-300 shadow-xs' 
+                                                                : 'bg-amber-950/20 border-amber-600/60 shadow-sm'
+                                                            : isLight 
+                                                                ? 'bg-white border-slate-200 hover:border-slate-300' 
+                                                                : 'bg-zinc-950/80 border-zinc-800/90 hover:border-zinc-700'
+                                                    }`}
+                                                >
+                                                    {/* Üst Bilgi: Yazar, Tag, Zaman & Eylemler */}
+                                                    <div className="flex items-center justify-between gap-2">
+                                                        <div className="flex items-center gap-2 min-w-0">
+                                                            <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 text-[10px] font-bold ${
+                                                                isLight 
+                                                                    ? 'bg-rose-100 border border-rose-200 text-rose-700' 
+                                                                    : 'bg-rose-600/30 border border-rose-500/40 text-rose-300'
+                                                            }`}>
+                                                                {c.user_name.charAt(0).toUpperCase()}
+                                                            </div>
+                                                            <span className={`font-bold truncate ${
+                                                                isLight ? 'text-slate-800' : 'text-zinc-200'
+                                                            }`}>{c.user_name}</span>
+                                                            <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${tagBadge.color}`}>
+                                                                {tagBadge.label}
+                                                            </span>
+                                                            {isPinned && (
+                                                                <span className={`text-[10px] font-bold font-mono px-1.5 py-0.5 rounded border ${
+                                                                    isLight 
+                                                                        ? 'text-amber-800 bg-amber-100 border-amber-300' 
+                                                                        : 'text-amber-400 bg-amber-950/60 border-amber-800/80'
+                                                                }`}>
+                                                                    📌 Sabitlendi
+                                                                </span>
+                                                            )}
+                                                        </div>
+
+                                                        <div className="flex items-center gap-2 shrink-0">
+                                                            <span className={`text-[10px] font-mono ${
+                                                                isLight ? 'text-slate-400' : 'text-zinc-500'
+                                                            }`}>
+                                                                {new Date(c.created_at).toLocaleString('tr-TR', {
+                                                                    day: '2-digit',
+                                                                    month: '2-digit',
+                                                                    hour: '2-digit',
+                                                                    minute: '2-digit',
+                                                                })}
+                                                            </span>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => handleToggleCommentPin(c.id)}
+                                                                className={`p-1 rounded text-xs transition-colors ${
+                                                                    isPinned 
+                                                                        ? isLight ? 'text-amber-600 hover:text-amber-500' : 'text-amber-400 hover:text-amber-300'
+                                                                        : isLight ? 'text-slate-400 hover:text-slate-600' : 'text-zinc-500 hover:text-zinc-300'
+                                                                }`}
+                                                                title={isPinned ? 'Sabitlemeyi Kaldır' : 'Yorumu Sabitle'}
+                                                            >
+                                                                📌
+                                                            </button>
+                                                            {canDelete && (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => handleDeleteComment(c.id)}
+                                                                    className={`p-1 rounded text-xs transition-colors ${
+                                                                        isLight ? 'text-slate-400 hover:text-rose-600' : 'text-zinc-500 hover:text-rose-400'
+                                                                    }`}
+                                                                    title="Yorumu Sil"
+                                                                >
+                                                                    ✕
+                                                                </button>
+                                                            )}
+                                                        </div>
+                                                    </div>
+
+                                                    {/* Yorum İçeriği */}
+                                                    <p className={`leading-relaxed font-sans pl-1 ${
+                                                        isLight ? 'text-slate-800' : 'text-zinc-200'
+                                                    }`}>{c.content}</p>
+
+                                                    {/* Reaksiyon Çubuğu */}
+                                                    <div className={`flex items-center gap-1.5 pt-1 border-t ${
+                                                        isLight ? 'border-slate-100' : 'border-zinc-900/60'
+                                                    }`}>
+                                                        {['👍', '🚀', '❤️', '👀'].map(emoji => {
+                                                            const users = (c.reactions && c.reactions[emoji]) || [];
+                                                            const hasReacted = users.includes(currentMember?.id || 'anon');
+
+                                                            return (
+                                                                <button
+                                                                    key={emoji}
+                                                                    type="button"
+                                                                    onClick={() => handleToggleCommentReaction(c.id, emoji)}
+                                                                    className={`px-2 py-0.5 rounded-lg text-xs font-mono transition-all flex items-center gap-1 ${
+                                                                        hasReacted
+                                                                            ? isLight
+                                                                                ? 'bg-rose-50 border border-rose-300 text-rose-700'
+                                                                                : 'bg-rose-950/80 border border-rose-700 text-rose-200'
+                                                                            : isLight
+                                                                                ? 'bg-slate-100 hover:bg-slate-200/70 text-slate-600 border border-slate-200'
+                                                                                : 'bg-zinc-900/80 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 border border-zinc-800'
+                                                                    }`}
+                                                                >
+                                                                    <span>{emoji}</span>
+                                                                    {users.length > 0 && <span className="text-[10px] font-bold">{users.length}</span>}
+                                                                </button>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })
+                                )}
+                            </div>
+                        </div>
+
+                        {/* ── BÖLÜM 10: DÜZENLEME GEÇMİŞİ & REVİZYON KAYITLARI (CHANGELOG) ── */}
+                        {event && (
+                            <div className={`p-4 rounded-2xl ${
+                                isLight
+                                    ? 'bg-slate-50/80 border border-slate-200'
+                                    : 'bg-zinc-900/70 border border-zinc-800'
+                            } space-y-3.5`}>
+                                <div className={`flex items-center justify-between border-b pb-2 ${
+                                    isLight ? 'border-slate-200' : 'border-zinc-800'
+                                }`}>
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-sm">📜</span>
+                                        <span className={`text-xs font-bold uppercase tracking-wider ${
+                                            isLight ? 'text-slate-700' : 'text-zinc-200'
+                                        }`}>
+                                            Düzenleme Geçmişi ({event.edit_history?.length || 0})
+                                        </span>
+                                    </div>
+                                    <span className={`text-[10px] font-mono font-medium px-2 py-0.5 rounded ${
+                                        isLight ? 'bg-slate-200/70 text-slate-700' : 'bg-zinc-800 text-zinc-300'
+                                    }`}>
+                                        Versiyon: v{event.version || 1}
+                                    </span>
+                                </div>
+
+                                {event.edit_history && event.edit_history.length > 0 ? (
+                                    <div className="space-y-2.5 max-h-52 overflow-y-auto pr-1">
+                                        {[...event.edit_history].reverse().map((record) => {
+                                            const recMember = members.find(m => m.id === record.user_id);
+                                            const recAvatar = recMember?.avatar_url;
+                                            const recName = record.user_name || recMember?.display_name || recMember?.full_name || 'Topluluk Yöneticisi';
+                                            const recDate = new Date(record.timestamp);
+
+                                            return (
+                                                <div
+                                                    key={record.id}
+                                                    className={`p-2.5 rounded-xl border text-xs flex items-start gap-3 transition-colors ${
+                                                        isLight
+                                                            ? 'bg-white border-slate-200 hover:border-slate-300'
+                                                            : 'bg-zinc-950 border-zinc-850 hover:border-zinc-700'
+                                                    }`}
+                                                >
+                                                    <div className="shrink-0 mt-0.5">
+                                                        {recAvatar ? (
+                                                            <img
+                                                                src={recAvatar}
+                                                                alt={recName}
+                                                                className="w-6 h-6 rounded-lg object-cover ring-1 ring-slate-200 dark:ring-zinc-700"
+                                                            />
+                                                        ) : (
+                                                            <div className="w-6 h-6 rounded-lg bg-gradient-to-tr from-rose-500 to-amber-500 flex items-center justify-center text-[9px] font-bold text-white shadow-xs">
+                                                                {recName.substring(0, 2).toUpperCase()}
+                                                            </div>
+                                                        )}
+                                                    </div>
+
+                                                    <div className="flex-1 space-y-0.5">
+                                                        <div className="flex items-center justify-between gap-2">
+                                                            <div className="flex items-center gap-1.5 flex-wrap">
+                                                                <span className={`font-bold ${isLight ? 'text-slate-900' : 'text-zinc-100'}`}>
+                                                                    {recName}
+                                                                </span>
+                                                                {record.user_role && (
+                                                                    <span className={`text-[9px] px-1.5 py-0.2 rounded font-mono ${
+                                                                        record.user_role === 'super_admin'
+                                                                            ? isLight ? 'bg-amber-100 text-amber-800' : 'bg-amber-950/60 text-amber-300'
+                                                                            : isLight ? 'bg-slate-100 text-slate-700' : 'bg-zinc-800 text-zinc-300'
+                                                                    }`}>
+                                                                        {record.user_role === 'super_admin' ? 'Admin' : record.user_role}
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                            <span className={`text-[10px] font-mono shrink-0 ${isLight ? 'text-slate-400' : 'text-zinc-500'}`}>
+                                                                {recDate.toLocaleDateString('tr-TR', { day: 'numeric', month: 'short' })} {recDate.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })}
+                                                            </span>
+                                                        </div>
+
+                                                        <p className={`text-[11px] leading-relaxed font-medium ${isLight ? 'text-slate-600' : 'text-zinc-300'}`}>
+                                                            {record.action === 'created' ? (
+                                                                <span className="text-emerald-600 dark:text-emerald-400 font-semibold">✨ Etkinlik oluşturuldu: {record.summary}</span>
+                                                            ) : record.action === 'reverted' ? (
+                                                                <span className="text-amber-600 dark:text-amber-400 font-semibold">↺ Geri alındı: {record.summary}</span>
+                                                            ) : (
+                                                                <span>✎ {record.summary}</span>
+                                                            )}
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                ) : (
+                                    <div className={`p-3 rounded-xl border text-center italic text-xs ${
+                                        isLight ? 'bg-white border-slate-200 text-slate-400' : 'bg-zinc-950 border-zinc-800 text-zinc-500'
+                                    }`}>
+                                        Bu etkinlik için henüz kayıtlı bir düzenleme geçmişi bulunmuyor.
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </>
+                )}
+                            </>
+                        )}
+
+                    </div>
+
+                    {/* ── 3. FOOTER ACTIONS ── */}
+                    <div className={`p-4 border-t flex flex-col sm:flex-row items-center justify-between gap-3 backdrop-blur-md shrink-0 ${
+                        isLight ? 'border-slate-200 bg-slate-50/95' : 'border-zinc-800 bg-zinc-900/90'
+                    }`}>
+                        {isReadOnly && event ? (
+                            <>
+                                <div className="flex items-center gap-2">
+                                    <span className={`text-xs px-3 py-1 rounded-full font-semibold border ${
+                                        isLight ? 'bg-slate-100 border-slate-300 text-slate-600' : 'bg-zinc-800 border-zinc-700 text-zinc-400'
+                                    }`}>
+                                        👁️ Etkinliği Görüntüleme Modu
+                                    </span>
+                                    <span className={`text-[11px] hidden sm:inline ${
+                                        isLight ? 'text-slate-500' : 'text-zinc-500'
+                                    }`}>
+                                        Yalnızca etkinlik sahibi veya yöneticiler düzenleyebilir.
+                                    </span>
+                                </div>
+                                <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+                                    <button
+                                        type="button"
+                                        onClick={onClose}
+                                        className={`w-full sm:w-auto px-6 py-2.5 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                                            isLight
+                                                ? 'bg-slate-100 hover:bg-slate-200 text-slate-800 border-slate-300 shadow-xs active:scale-98'
+                                                : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border-zinc-700 active:scale-98'
+                                        }`}
+                                    >
+                                        Kapat
+                                    </button>
+                                </div>
+                            </>
+                        ) : (
+                            <>
+                                <div className="flex items-center gap-2 w-full sm:w-auto justify-between sm:justify-start">
+                                    {event && canDeleteEvent && (
+                                        <button
+                                            type="button"
+                                            onClick={handleDelete}
+                                            disabled={isDeleting}
+                                            className={`px-3.5 py-2 rounded-xl text-xs font-bold border transition-colors ${
+                                                isLight 
+                                                    ? 'text-rose-600 hover:text-rose-700 hover:bg-rose-50 border-rose-200' 
+                                                    : 'text-rose-400 hover:text-rose-300 hover:bg-rose-950/60 border border-rose-900/50'
+                                            }`}
+                                        >
+                                            {isDeleting ? 'Siliniyor...' : 'Etkinliği Sil'}
+                                        </button>
+                                    )}
+
+                                    {/* Sekmeler Arası Hızlı Adım Butonları */}
+                                    <div className="flex items-center gap-1.5">
+                                        {activeDrawerTab !== 'general' && (
+                                            <button
+                                                type="button"
+                                                onClick={goToPrevTab}
+                                                className={`px-3 py-1.5 rounded-xl text-xs font-semibold border transition-colors ${
+                                                    isLight
+                                                        ? 'border-slate-300 text-slate-700 hover:bg-slate-100'
+                                                        : 'border-zinc-700 text-zinc-300 hover:bg-zinc-800'
+                                                }`}
+                                            >
+                                                ← Önceki
+                                            </button>
+                                        )}
+                                        {activeDrawerTab !== 'communication' && (
+                                            <button
+                                                type="button"
+                                                onClick={goToNextTab}
+                                                className={`px-3 py-1.5 rounded-xl text-xs font-semibold border transition-colors ${
+                                                    isLight
+                                                        ? 'border-rose-300 bg-rose-50 text-rose-700 hover:bg-rose-100'
+                                                        : 'border-rose-800 bg-rose-950/40 text-rose-300 hover:bg-rose-900/50'
+                                                }`}
+                                            >
+                                                Sonraki →
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+
+                                <div className="flex flex-wrap items-center gap-2.5 w-full sm:w-auto justify-end">
+                                    {/* 🌟 Ana Sayfa Vitrin Hızlı Seçimi */}
+                                    <label className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-semibold cursor-pointer select-none transition-colors ${
+                                        isShowcase
+                                            ? isLight
+                                                ? 'bg-rose-50 border-rose-300 text-rose-700 font-bold shadow-xs'
+                                                : 'bg-rose-950/60 border-rose-700 text-rose-300 font-bold shadow-sm'
+                                            : isLight
+                                                ? 'bg-white border-slate-300 text-slate-600 hover:border-slate-400'
+                                                : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:border-zinc-600'
+                                    }`}>
+                                        <input
+                                            type="checkbox"
+                                            checked={isShowcase}
+                                            onChange={(e) => setIsShowcase(e.target.checked)}
+                                            className="w-4 h-4 rounded accent-rose-600 cursor-pointer"
+                                        />
+                                        <span>🌟 Ana Sayfada Yayınla</span>
+                                    </label>
+
+                                    <button
+                                        type="button"
+                                        onClick={onClose}
+                                        className={`px-4 py-2 rounded-xl text-xs font-bold transition-colors ${
+                                            isLight 
+                                                ? 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/80' 
+                                                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'
+                                        }`}
+                                    >
+                                        {isEventPast && !canEditPast ? 'Kapat' : 'İptal'}
+                                    </button>
+                                    {(!isEventPast || canEditPast) && (
+                                        <button
+                                            type="submit"
+                                            form="event-form"
+                                            disabled={isSaving}
+                                            className="px-6 py-2.5 rounded-xl text-xs font-bold text-white bg-rose-600 hover:bg-rose-500 shadow-lg shadow-rose-950/40 transition-all disabled:opacity-50"
+                                        >
+                                            {isSaving ? 'Kaydediliyor...' : (event ? 'Güncelle' : 'Etkinliği Oluştur')}
+                                        </button>
+                                    )}
+                                </div>
+                            </>
+                        )}
+                    </div>
+
+                </div>
+            </div>
+        </div>
+    );
+}
